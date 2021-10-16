@@ -246,7 +246,7 @@ $(function () {
                     name = slicer.key;
                 }
 
-                if (slicer.default && slicer.configured) {
+                if (slicer.configured) {
                     selectedSlicer = slicer.key;
                 }
 
