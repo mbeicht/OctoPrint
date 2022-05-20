@@ -133,7 +133,7 @@ Example: Your PC has an IP address of ``192.168.23.42`` and a subnet mask of
 The easy way: Using the OctoPrint-AutoLoginConfig plugin
 ........................................................
 
-The easist way to configure AutoLogin is to install the
+The easiest way to configure AutoLogin is to install the
 `OctoPrint-AutoLoginConfig plugin <https://plugins.octoprint.org/plugins/autologin_config/>`_
 via the plugin manager.
 
@@ -184,6 +184,7 @@ further down there's also a dedicated list of steps for OctoPi specifically.
           autologinAs: "<yourUsername>"
           localNetworks:
           - "127.0.0.0/8"
+          - "::1/128"
           - "<yourAddressRange>"
 
 4. Restart OctoPrint, check that everything works.

@@ -368,9 +368,8 @@
         return constructor;
     };
 
-    OctoPrintClient.InvalidArgumentError = OctoPrintClient.createCustomException(
-        "InvalidArgumentError"
-    );
+    OctoPrintClient.InvalidArgumentError =
+        OctoPrintClient.createCustomException("InvalidArgumentError");
 
     OctoPrintClient.deprecated = function (deprecatedFct, newFct, fn) {
         return function () {
@@ -424,6 +423,12 @@
                 )(val);
             }
         });
+    };
+
+    OctoPrintClient.escapePath = function (path) {
+        return _.map(path.split("/"), function (p) {
+            return encodeURIComponent(p);
+        }).join("/");
     };
 
     return OctoPrintClient;
