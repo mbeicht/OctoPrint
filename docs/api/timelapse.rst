@@ -27,16 +27,11 @@ Retrieve a list of timelapses and the current config
 Delete a timelapse
 ==================
 
-.. http:delete:: /api/timelapse/(string:name)
+.. http:delete:: /api/timelapse/(string:filename)
 
-   Delete the timelapse ``name``.
-   
-   Returns a :ref:`timelapse list <sec-api-timelapse-datamodel-list>` in the
-   response body with the updated information.
+   Delete the timelapse ``filename``.
 
    Requires the ``TIMELAPSE_DELETE`` permission.
-
-   :param unrendered: If provided and true, also include unrendered timelapses in the response
 
 .. _sec-api-timelapse-render:
 
@@ -61,12 +56,7 @@ Delete an unrendered timelapse
 
    Delete the unrendered timelapse ``name``.
 
-   Returns a :ref:`timelapse list <sec-api-timelapse-datamodel-list>` in the
-   response body.
-
    Requires the ``TIMELAPSE_DELETE`` permission.
-
-   :param unrendered: If provided and true, also include unrendered timelapses in the response
 
 .. _sec-api-timelapse-saveconfig:
 
@@ -75,18 +65,11 @@ Change current timelapse config
 
 .. http:post:: /api/timelapse
 
-   Save a new :ref:`timelapse configuration <sec-api-timelapse-datamodel-config>` to use for the next print. Set the optional ``save`` flag in the
-   configuration to ``true`` in order to make the new configuration persist accross restarts.
+   Save a new :ref:`timelapse configuration <sec-api-timelapse-datamodel-config>` to use for the next print.
 
    The configuration is expected as the request body.
 
-   Returns a :ref:`timelapse list <sec-api-timelapse-datamodel-list>` in the
-   response body.
-
    Requires the ``TIMELAPSE_ADMIN`` permission.
-
-   :param unrendered: If provided and true, also include unrendered timelapses in the response
-
 
 .. _sec-api-timelapse-datamodel:
 
@@ -152,10 +135,6 @@ Rendered timelapse
      - 1
      - string
      - URL for downloading the timelapse
-   * - ``thumbnail``
-     - 1
-     - string
-     - URL for downloading a thumbnail of the timelapse (optional)
 
 .. _sec-api-timelapse-datamodel-unrendered:
 
@@ -217,10 +196,6 @@ Timelapse configuration
      - 1
      - string
      - Type of the timelapse, either ``off``, ``zchange`` or ``timed``.
-   * - ``save``
-     - 1
-     - bool
-     - Optional flag to be included when when saving a configuration to make the configuration persist accross restarts
 
 Further fields are timelapse type specific, see below for details.
 

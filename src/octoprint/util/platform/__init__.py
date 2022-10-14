@@ -1,6 +1,8 @@
+# -*- coding: utf-8 -*-
 """
 This module bundles platform specific flags and implementations.
 """
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2017 The OctoPrint Project - Released under terms of the AGPLv3 License"
@@ -21,6 +23,7 @@ if fcntl is not None and hasattr(fcntl, "FD_CLOEXEC"):
         flags = fcntl.fcntl(handle, fcntl.F_GETFD)
         flags |= fcntl.FD_CLOEXEC
         fcntl.fcntl(handle, fcntl.F_SETFD, flags)
+
 
 elif sys.platform == "win32":
 
@@ -44,6 +47,7 @@ elif sys.platform == "win32":
         if not result:
             raise ctypes.GetLastError()
 
+
 else:
 
     def set_close_exec(handle):
@@ -58,8 +62,14 @@ CLOSE_FDS = True
 Default setting for close_fds parameter to Popen/sarge.run.
 
 Set ``close_fds`` on every sub process to this to ensure file handlers will be closed
-on child processes on platforms.
+on child processes on platforms that support this (anything Python 3.7+ or anything
+but win32 in earlier Python versions).
 """
+
+if sys.platform == "win32" and sys.version_info < (3, 7):
+    # close_fds=True is only supported on win32 with enabled stdout/stderr
+    # capturing starting with Python 3.7
+    CLOSE_FDS = False
 
 # current os
 

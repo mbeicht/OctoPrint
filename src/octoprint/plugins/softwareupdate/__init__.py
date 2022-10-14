@@ -1,16 +1,23 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 import datetime
 
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
+
 import copy
 import hashlib
+import io
 import logging
 import logging.handlers
 import os
 import threading
 import time
+
+# noinspection PyCompatibility
 from concurrent import futures
 
 import flask
@@ -27,15 +34,12 @@ from octoprint.server.util.flask import (
     no_firstrun_access,
     with_revalidation_checking,
 )
-from octoprint.util import RepeatedTimer, dict_merge, get_formatted_size, to_unicode, yaml
-from octoprint.util.commandline import CommandlineError
+from octoprint.util import dict_merge, get_formatted_size, to_unicode
 from octoprint.util.pip import create_pip_caller
 from octoprint.util.version import (
     get_comparable_version,
     get_python_version_string,
     is_python_compatible,
-    is_released_octoprint_version,
-    is_stable,
 )
 
 from . import cli, exceptions, updaters, util, version_checks
@@ -60,9 +64,9 @@ class SoftwareUpdatePlugin(
     octoprint.plugin.WizardPlugin,
     octoprint.plugin.EventHandlerPlugin,
 ):
+
     COMMIT_TRACKING_TYPES = ("github_commit", "bitbucket_commit")
     CURRENT_TRACKING_TYPES = COMMIT_TRACKING_TYPES + ("etag", "lastmodified", "jsondata")
-    RELEASE_TRACKING_TYPES = ("github_release",)
 
     OCTOPRINT_RESTART_TYPES = ("pip", "single_file_plugin")
 
@@ -97,9 +101,6 @@ class SoftwareUpdatePlugin(
         self._update_log_path = None
         self._update_log_dirty = False
         self._update_log_mutex = threading.RLock()
-        self._queued_updates = {"targets": [], "force": True}
-        self._queued_updates_abort_timer = None
-        self._print_cancelled = False
 
         self._environment_supported = True
         self._environment_versions = {}
@@ -249,8 +250,8 @@ class SoftwareUpdatePlugin(
                         hook_checks = hook()
                     except Exception:
                         self._logger.exception(
-                            f"Error while retrieving update information "
-                            f"from plugin {name}",
+                            "Error while retrieving update information "
+                            "from plugin {name}".format(**locals()),
                             extra={"plugin": name},
                         )
                     else:
@@ -386,7 +387,9 @@ class SoftwareUpdatePlugin(
                 data = psutil.disk_usage(path)
                 info["free"] = data.free
             except Exception:
-                self._logger.exception(f"Error while determining disk usage of {path}")
+                self._logger.exception(
+                    "Error while determining disk usage of {}".format(path)
+                )
                 continue
 
             storage_info[key] = info
@@ -422,13 +425,15 @@ class SoftwareUpdatePlugin(
         )
 
     def _get_check_overlay(self, url):
-        self._logger.info(f"Fetching check overlays from {url}")
+        self._logger.info("Fetching check overlays from {}".format(url))
         try:
             r = requests.get(url, timeout=3.1)
             r.raise_for_status()
             data = r.json()
         except Exception as exc:
-            self._logger.error(f"Could not fetch check overlay from {url}: {exc}")
+            self._logger.error(
+                "Could not fetch check overlay from {}: {}".format(url, exc)
+            )
             return {}
         else:
             return data
@@ -471,8 +476,11 @@ class SoftwareUpdatePlugin(
         if not os.path.isfile(self._version_cache_path):
             return
 
+        import yaml
+
         try:
-            data = yaml.load_from_file(path=self._version_cache_path)
+            with io.open(self._version_cache_path, "rt", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
             timestamp = os.stat(self._version_cache_path).st_mtime
         except Exception:
             self._logger.exception("Error while loading version cache from disk")
@@ -509,6 +517,8 @@ class SoftwareUpdatePlugin(
                 self._logger.exception("Error parsing in version cache data")
 
     def _save_version_cache(self):
+        import yaml
+
         from octoprint._version import get_versions
         from octoprint.util import atomic_write
 
@@ -518,7 +528,13 @@ class SoftwareUpdatePlugin(
         with atomic_write(
             self._version_cache_path, mode="wt", max_permissions=0o666
         ) as file_obj:
-            yaml.save_to_file(self._version_cache, file=file_obj, pretty=True)
+            yaml.safe_dump(
+                self._version_cache,
+                stream=file_obj,
+                default_flow_style=False,
+                indent=2,
+                allow_unicode=True,
+            )
 
         self._version_cache_dirty = False
         self._version_cache_timestamp = time.time()
@@ -536,8 +552,11 @@ class SoftwareUpdatePlugin(
         if not os.path.isfile(self._update_log_path):
             return
 
+        import yaml
+
         try:
-            data = yaml.load_from_file(path=self._update_log_path)
+            with io.open(self._update_log_path, "rt", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
         except Exception:
             self._logger.exception("Error while loading update log from disk")
         else:
@@ -558,7 +577,9 @@ class SoftwareUpdatePlugin(
             )
             cleaned_up = len(data) - before_cleanup
             if cleaned_up:
-                self._logger.info(f"Cleaned up {cleaned_up} old update log entries")
+                self._logger.info(
+                    "Cleaned up {} old update log entries".format(cleaned_up)
+                )
 
             with self._update_log_mutex:
                 self._update_log = data
@@ -567,16 +588,20 @@ class SoftwareUpdatePlugin(
             self._logger.info("Loaded update log from disk")
 
     def _save_update_log(self):
+        import yaml
+
         from octoprint.util import atomic_write
 
         with self._update_log_mutex:
             with atomic_write(
                 self._update_log_path, mode="wt", max_permissions=0o666
             ) as file_obj:
-                yaml.save_to_file(
+                yaml.safe_dump(
                     sorted(self._update_log, key=lambda x: x["datetime"]),
-                    file=file_obj,
-                    pretty=True,
+                    stream=file_obj,
+                    default_flow_style=False,
+                    indent=2,
+                    allow_unicode=True,
                 )
                 self._update_log_dirty = False
 
@@ -630,7 +655,8 @@ class SoftwareUpdatePlugin(
             return False
 
         restart_type = self._get_restart_type(check)
-        return self._has_restart_command(restart_type)
+        restart_command = self._get_restart_command(restart_type)
+        return restart_command is not None
 
     def _get_restart_type(self, check):
         if check.get("restart") in self.VALID_RESTART_TYPES:
@@ -642,13 +668,17 @@ class SoftwareUpdatePlugin(
 
         return target_restart_type
 
-    def _has_restart_command(self, restart_type):
+    def _get_restart_command(self, restart_type):
         if restart_type == "octoprint":
-            return self._system_commands.has_server_restart_command()
+            return self._settings.global_get(
+                ["server", "commands", "serverRestartCommand"]
+            )
         elif restart_type == "environment":
-            return self._system_commands.has_system_restart_command()
+            return self._settings.global_get(
+                ["server", "commands", "systemRestartCommand"]
+            )
         else:
-            return False
+            return None
 
     # ~~ SettingsPlugin API
 
@@ -762,8 +792,6 @@ class SoftwareUpdatePlugin(
         # ~~ pip check settings
 
         data["pip_enable_check"] = "pip" in checks
-
-        data["queued_updates"] = self._queued_updates.get("targets", [])
 
         return data
 
@@ -1287,6 +1315,10 @@ class SoftwareUpdatePlugin(
                 description=message,
             )
 
+        if self._printer.is_printing() or self._printer.is_paused():
+            # do not update while a print job is running
+            flask.abort(409, description="Printer is currently printing or paused")
+
         if not self._environment_supported:
             flask.abort(
                 409,
@@ -1315,63 +1347,8 @@ class SoftwareUpdatePlugin(
 
         force = json_data.get("force", "false") in octoprint.settings.valid_boolean_trues
 
-        if self._printer.is_printing() or self._printer.is_paused():
-            # do not update while a print job is running
-            # store targets to be run later on print done event
-            self._queued_updates["targets"] = list(
-                set(self._queued_updates["targets"] + targets)
-            )
-            self._send_client_message(
-                "queued_updates",
-                {"targets": self._queued_updates["targets"]},
-            )
-
-            return (
-                flask.jsonify({"queued": self._queued_updates.get("targets", False)}),
-                202,
-            )
-
         to_be_checked, checks = self.perform_updates(targets=targets, force=force)
         return flask.jsonify({"order": to_be_checked, "checks": checks})
-
-    @octoprint.plugin.BlueprintPlugin.route("/update/queued", methods=["POST"])
-    @no_firstrun_access
-    @Permissions.PLUGIN_SOFTWAREUPDATE_UPDATE.require(403)
-    def cancel_queued(self):
-        if "application/json" not in flask.request.headers["Content-Type"]:
-            flask.abort(400, description="Expected content-type JSON")
-
-        json_data = flask.request.get_json(silent=True)
-        if json_data is None:
-            flask.abort(400, description="Invalid JSON")
-
-        command = json_data.get("command")
-        if command == "cancel":
-            targets = [x.strip() for x in json_data.get("targets", [])]
-
-            if targets:
-                self._queued_updates["targets"] = [
-                    x for x in self._queued_updates["targets"] if x not in targets
-                ]
-            else:
-                self._queued_updates["targets"] = []
-
-            if not self._queued_updates["targets"] and self._queued_updates_abort_timer:
-                self._queued_updates_abort_timer.cancel()
-                self._queued_updates_abort_timer = None
-
-            self._send_client_message(
-                "queued_updates",
-                {"targets": self._queued_updates["targets"]},
-            )
-
-            return (
-                flask.jsonify({"queued": self._queued_updates["targets"]}),
-                202,
-            )
-
-        else:
-            flask.abort(400, description="Expected a valid command")
 
     @octoprint.plugin.BlueprintPlugin.route("/configure", methods=["POST"])
     @no_firstrun_access
@@ -1391,7 +1368,9 @@ class SoftwareUpdatePlugin(
             try:
                 populated_check = self._populated_check(target, checks[target])
             except exceptions.UnknownCheckType:
-                self._logger.debug(f"Ignoring unknown check type for target {target}")
+                self._logger.debug(
+                    "Ignoring unknown check type for target {}".format(target)
+                )
                 continue
             except Exception:
                 self._logger.exception(
@@ -1529,33 +1508,7 @@ class SoftwareUpdatePlugin(
     def on_event(self, event, payload):
         from octoprint.events import Events
 
-        if event == Events.PRINT_STARTED:
-            self._queued_updates_timer_stop()
-            self._print_cancelled = False
-        elif (
-            event == Events.PRINT_DONE
-            and self._settings.global_get(["webcam", "timelapse", "type"]) == "off"
-            and len(self._queued_updates.get("targets", [])) > 0
-        ):
-            self._queued_updates_timer_start()
-        elif (
-            event == Events.PRINT_FAILED
-            and len(self._queued_updates.get("targets", [])) > 0
-        ):
-            self._send_client_message(
-                "queued_updates",
-                {"print_failed": True, "targets": self._queued_updates["targets"]},
-            )
-            self._print_cancelled = True
-        elif (
-            event == Events.MOVIE_DONE
-            and self._settings.global_get(["webcam", "timelapse", "type"]) != "off"
-            and len(self._queued_updates.get("targets", [])) > 0
-            and not (self._printer.is_printing() or self._printer.is_paused())
-            and not self._print_cancelled
-        ):
-            self._queued_updates_timer_start()
-        elif (
+        if (
             event != Events.CONNECTIVITY_CHANGED
             or not payload
             or not payload.get("new", False)
@@ -1609,9 +1562,6 @@ class SoftwareUpdatePlugin(
                         if not check:
                             continue
 
-                        if "type" not in check:
-                            continue
-
                         try:
                             populated_check = self._populated_check(target, check)
                             future = executor.submit(
@@ -1631,7 +1581,7 @@ class SoftwareUpdatePlugin(
                             continue
                         except Exception:
                             self._logger.exception(
-                                f"Could not check {target} for updates"
+                                "Could not check {} for updates".format(target)
                             )
                             continue
 
@@ -1779,9 +1729,9 @@ class SoftwareUpdatePlugin(
             for key in sorted(d.keys()):
                 value = d[key]
                 if isinstance(value, dict):
-                    lines.append(f"{key!r}: {dict_to_sorted_repr(value)}")
+                    lines.append("{!r}: {}".format(key, dict_to_sorted_repr(value)))
                 else:
-                    lines.append(f"{key!r}: {value!r}")
+                    lines.append("{!r}: {!r}".format(key, value))
 
             return "{" + ", ".join(lines) + "}"
 
@@ -1858,16 +1808,10 @@ class SoftwareUpdatePlugin(
             error = "unknown_check"
         except exceptions.NetworkError:
             self._logger.warning(
-                f"Could not check {target} for updates due to a network error"
+                "Could not check {} for updates due to a network error".format(target)
             )
             update_possible = False
             error = "network"
-        except exceptions.ApiCheckError as exc:
-            self._logger.warning(
-                f"Could not check {target} for updates due to an API error: {exc}"
-            )
-            update_possible = False
-            error = "api"
         except exceptions.RateLimitCheckError as exc:
             self._logger.warning(
                 "Could not check {} for updates due to running into a rate limit: {}".format(
@@ -1878,12 +1822,12 @@ class SoftwareUpdatePlugin(
             error = "ratelimit"
         except exceptions.CheckError:
             self._logger.warning(
-                f"Could not check {target} for updates due to a check error"
+                "Could not check {} for updates due to a check error".format(target)
             )
             update_possible = False
             error = "check"
         except Exception:
-            self._logger.exception(f"Could not check {target} for updates")
+            self._logger.exception("Could not check {} for updates".format(target))
             update_possible = False
             error = "unknown"
         else:
@@ -1893,7 +1837,9 @@ class SoftwareUpdatePlugin(
                     target, check, online=online
                 )
             except Exception:
-                self._logger.exception(f"Error while checking if {target} can be updated")
+                self._logger.exception(
+                    "Error while checking if {} can be updated".format(target)
+                )
                 update_possible = False
 
         self._version_cache[target] = {
@@ -1909,52 +1855,6 @@ class SoftwareUpdatePlugin(
         }
         self._version_cache_dirty = True
         return information, update_available, update_possible, online, error
-
-    def _queued_updates_timer_start(self):
-        if self._queued_updates_abort_timer is not None:
-            return
-
-        self._logger.debug("Starting queued updates timer.")
-
-        self._timeout_value = 60
-        self._queued_updates_abort_timer = RepeatedTimer(
-            1, self._queued_updates_timer_task
-        )
-        self._queued_updates_abort_timer.start()
-
-    def _queued_updates_timer_stop(self):
-        if self._queued_updates_abort_timer is not None:
-            self._queued_updates_abort_timer.cancel()
-            self._queued_updates_abort_timer = None
-            self._send_client_message(
-                "queued_updates",
-                {
-                    "targets": self._queued_updates["targets"],
-                    "timeout_value": -1,
-                },
-            )
-
-    def _queued_updates_timer_task(self):
-        if self._timeout_value is None:
-            return
-
-        self._timeout_value -= 1
-        if self._timeout_value <= 0:
-            if self._queued_updates_abort_timer is not None:
-                self._queued_updates_abort_timer.cancel()
-                self._queued_updates_abort_timer = None
-                self.perform_updates(
-                    targets=self._queued_updates["targets"],
-                    force=self._queued_updates["force"],
-                )
-                self._queued_updates = {"targets": [], "force": True}
-        self._send_client_message(
-            "queued_updates",
-            {
-                "targets": self._queued_updates["targets"],
-                "timeout_value": self._timeout_value,
-            },
-        )
 
     def perform_updates(self, force=False, **kwargs):
         """
@@ -1979,7 +1879,9 @@ class SoftwareUpdatePlugin(
             try:
                 populated_checks[target] = self._populated_check(target, check)
             except exceptions.UnknownCheckType:
-                self._logger.debug(f"Ignoring unknown check type for target {target}")
+                self._logger.debug(
+                    "Ignoring unknown check type for target {}".format(target)
+                )
             except Exception:
                 self._logger.exception(
                     "Error while populating check prior to update for target {}".format(
@@ -2075,13 +1977,14 @@ class SoftwareUpdatePlugin(
                 # one of our updates requires a restart of either type "octoprint" or "environment". Let's see if
                 # we can actually perform that
 
-                if self._has_restart_command(restart_type):
+                restart_command = self._get_restart_command(restart_type)
+                if restart_command:
                     self._send_client_message(
                         "restarting",
                         {"restart_type": restart_type, "results": target_results},
                     )
                     try:
-                        self._perform_restart(restart_type)
+                        self._perform_restart(restart_command)
                     except exceptions.RestartFailed:
                         self._send_client_message(
                             "restart_failed",
@@ -2168,7 +2071,9 @@ class SoftwareUpdatePlugin(
         ### The actual update procedure starts here...
 
         try:
-            self._logger.info(f"Starting update of {target} to {target_version}...")
+            self._logger.info(
+                "Starting update of {} to {}...".format(target, target_version)
+            )
             self._send_client_message(
                 "updating",
                 {
@@ -2182,15 +2087,12 @@ class SoftwareUpdatePlugin(
                 raise exceptions.UnknownUpdateType()
 
             update_result = updater.perform_update(
-                target,
-                populated_check,
-                target_version,
-                log_cb=self._log,
-                online=online,
-                force=force,
+                target, populated_check, target_version, log_cb=self._log, online=online
             )
             target_result = ("success", update_result)
-            self._logger.info(f"Update of {target} to {target_version} successful!")
+            self._logger.info(
+                "Update of {} to {} successful!".format(target, target_version)
+            )
             trigger_event(True)
 
         except exceptions.UnknownUpdateType:
@@ -2291,21 +2193,20 @@ class SoftwareUpdatePlugin(
 
         check["current"] = current
 
-    def _perform_restart(self, restart_type):
+    def _perform_restart(self, restart_command):
         """
-        Performs a restart using the supplied restart_type.
+        Performs a restart using the supplied restart_command.
         """
 
         self._logger.info("Restarting...")
         try:
-            if restart_type == "octoprint":
-                return self._system_commands.perform_server_restart()
-            elif restart_type == "environment":
-                return self._system_commands.perform_system_restart()
-        except CommandlineError as e:
-            self._logger.exception(f"Error while restarting of type {restart_type}")
-            self._logger.warning(f"Restart stdout:\n{e.stdout}")
-            self._logger.warning(f"Restart stderr:\n{e.stderr}")
+            util.execute(restart_command, evaluate_returncode=False, do_async=True)
+        except exceptions.ScriptError as e:
+            self._logger.exception(
+                "Error while restarting via command {}".format(restart_command)
+            )
+            self._logger.warning("Restart stdout:\n{}".format(e.stdout))
+            self._logger.warning("Restart stderr:\n{}".format(e.stderr))
             raise exceptions.RestartFailed()
 
     def _populated_check(self, target, check):
@@ -2317,6 +2218,12 @@ class SoftwareUpdatePlugin(
         result = dict(check)
 
         if target == "octoprint":
+
+            from octoprint.util.version import (
+                is_released_octoprint_version,
+                is_stable_octoprint_version,
+            )
+
             displayName = check.get("displayName")
             if displayName is None:
                 # displayName missing or set to None
@@ -2329,12 +2236,52 @@ class SoftwareUpdatePlugin(
                 displayVersion = "{octoprint_version}"
             result["displayVersion"] = to_unicode(displayVersion, errors="replace")
 
+            stable_branch = "master"
+            release_branches = []
+            if "stable_branch" in check:
+                release_branches.append(check["stable_branch"]["branch"])
+                stable_branch = check["stable_branch"]["branch"]
+            if "prerelease_branches" in check:
+                release_branches += [x["branch"] for x in check["prerelease_branches"]]
             result["released_version"] = is_released_octoprint_version()
 
             if check["type"] in self.COMMIT_TRACKING_TYPES:
                 result["current"] = REVISION if REVISION else "unknown"
             else:
                 result["current"] = VERSION
+
+                if check["type"] == "github_release" and (
+                    check.get("prerelease", None) or not is_stable_octoprint_version()
+                ):
+                    # we are tracking github releases and are either also tracking prerelease OR are currently running
+                    # a non stable version => we need to change some parameters
+
+                    # we compare versions fully, not just the base so that we see a difference
+                    # between RCs + stable for the same version release
+                    result["force_base"] = False
+
+                    if check.get("prerelease", None):
+                        # we are tracking prereleases => we want to be on the correct prerelease channel/branch
+                        channel = check.get("prerelease_channel", None)
+                        if channel:
+                            # if we have a release channel, we also set our update_branch here to our release channel
+                            # in case it's not already set
+                            result["update_branch"] = check.get("update_branch", channel)
+
+                    else:
+                        # we are not tracking prereleases, but aren't on the stable branch either => switch back
+                        # to stable branch on update
+                        result["update_branch"] = check.get(
+                            "update_branch", stable_branch
+                        )
+
+                    if check.get("update_script", None):
+                        # we force an exact version & python unequality check, to be able to downgrade
+                        result["force_exact_version"] = True
+                        result["release_compare"] = "python_unequal"
+                    elif check.get("pip", None):
+                        # we force python unequality check for pip installs, to be able to downgrade
+                        result["release_compare"] = "python_unequal"
 
         elif target == "pip":
             import pkg_resources
@@ -2378,43 +2325,6 @@ class SoftwareUpdatePlugin(
                     "current", check.get("displayVersion", None)
                 )
 
-        if (
-            check["type"] in self.RELEASE_TRACKING_TYPES
-            and result["current"]
-            and (check.get("prerelease", None) or not is_stable(result["current"]))
-        ):
-            # we are tracking releases and are either also tracking prerelease OR are currently running
-            # a non stable version => we need to change some parameters
-
-            # we compare versions fully, not just the base so that we see a difference
-            # between RCs + stable for the same version release
-            result["force_base"] = False
-
-            if check["type"] == "github_release":
-                if check.get("prerelease", None):
-                    # we are tracking prereleases => we want to be on the correct prerelease channel/branch
-                    channel = check.get("prerelease_channel", None)
-                    if channel:
-                        # if we have a release channel, we also set our update_branch here to our release channel
-                        # in case it's not already set
-                        result["update_branch"] = check.get("update_branch", channel)
-
-                else:
-                    # we are not tracking prereleases, but aren't on the stable branch either => switch back
-                    # to stable branch on update
-                    result["update_branch"] = check.get(
-                        "update_branch",
-                        check.get("stable_branch", {"branch": "main"})["branch"],
-                    )
-
-            if check.get("update_script", None):
-                # we force an exact version & python unequality check, to be able to downgrade
-                result["force_exact_version"] = True
-                result["release_compare"] = "python_unequal"
-            elif check.get("pip", None):
-                # we force python unequality check for pip installs, to be able to downgrade
-                result["release_compare"] = "python_unequal"
-
         if result.get("pip", None):
             if "pip_command" not in result:
                 local_pip_command = self._settings.global_get(
@@ -2434,7 +2344,7 @@ class SoftwareUpdatePlugin(
             data={"loglines": [{"line": line, "stream": stream} for line in lines]},
         )
         for line in lines:
-            self._console_logger.debug(f"{prefix} {line}")
+            self._console_logger.debug("{} {}".format(prefix, line))
 
     def _send_client_message(self, message_type, data=None):
         self._plugin_manager.send_plugin_message(
@@ -2539,7 +2449,7 @@ def _register_custom_events(*args, **kwargs):
 
 __plugin_name__ = "Software Update"
 __plugin_author__ = "Gina Häußge"
-__plugin_url__ = "https://docs.octoprint.org/en/master/bundledplugins/softwareupdate.html"
+__plugin_url__ = "http://docs.octoprint.org/en/master/bundledplugins/softwareupdate.html"
 __plugin_description__ = "Allows receiving update notifications and performing updates of OctoPrint and plugins"
 __plugin_disabling_discouraged__ = gettext(
     "Without this plugin OctoPrint will no longer be able to "
@@ -2547,7 +2457,7 @@ __plugin_disabling_discouraged__ = gettext(
     "your system at risk."
 )
 __plugin_license__ = "AGPLv3"
-__plugin_pythoncompat__ = ">=3.7,<4"
+__plugin_pythoncompat__ = ">=2.7,<4"
 
 
 def __plugin_load__():

@@ -58,6 +58,8 @@ context("Login tests", () => {
 
     context("Successful logout", () => {
         it("logs out", () => {
+            Cypress.currentTest.retries(3);
+
             // login
             login(username, password);
 

@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 from flask import make_response
 
 __author__ = "Gina Häußge <osd@foosel.net>"
@@ -5,17 +8,15 @@ __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agp
 __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
 import functools
+import io
 import logging
 import os
 import threading
 import time
-from datetime import datetime
-from typing import Union
 
 import flask
 import flask.json
 import flask.sessions
-import flask.templating
 import flask_assets
 import flask_login
 import netaddr
@@ -23,6 +24,7 @@ import tornado.web
 import webassets.updater
 import webassets.utils
 from cachelib import BaseCache
+from past.builtins import basestring, long
 from werkzeug.local import LocalProxy
 from werkzeug.utils import cached_property
 
@@ -32,10 +34,14 @@ import octoprint.server
 import octoprint.vendor.flask_principal as flask_principal
 from octoprint.events import Events, eventManager
 from octoprint.settings import settings
-from octoprint.util import DefaultOrderedDict, deprecated, yaml
+from octoprint.util import DefaultOrderedDict, deprecated
 from octoprint.util.json import JsonEncoding
 from octoprint.util.net import is_lan_address
-from octoprint.util.tz import UTC_TZ, is_timezone_aware
+
+try:
+    from os import scandir, walk
+except ImportError:
+    from scandir import scandir, walk  # noqa: F401
 
 # ~~ monkey patching
 
@@ -62,11 +68,11 @@ def enable_additional_translations(default_locale="en", additional_folders=None)
             if not os.path.isdir(dirname):
                 return []
             result = []
-            for entry in os.scandir(dirname):
+            for entry in scandir(dirname):
                 locale_dir = os.path.join(entry.path, "LC_MESSAGES")
                 if not os.path.isdir(locale_dir):
                     continue
-                if any(filter(lambda x: x.name.endswith(".mo"), os.scandir(locale_dir))):
+                if any(filter(lambda x: x.name.endswith(".mo"), scandir(locale_dir))):
                     result.append(Locale.parse(entry.name))
             return result
 
@@ -104,12 +110,15 @@ def enable_additional_translations(default_locale="en", additional_folders=None)
                 # plugin translations
                 plugins = octoprint.plugin.plugin_manager().enabled_plugins
                 for name, plugin in plugins.items():
-                    dirs = list(
-                        map(
-                            lambda x: os.path.join(x, "_plugins", name),
-                            additional_folders,
+                    dirs = (
+                        list(
+                            map(
+                                lambda x: os.path.join(x, "_plugins", name),
+                                additional_folders,
+                            )
                         )
-                    ) + [os.path.join(plugin.location, "translations")]
+                        + [os.path.join(plugin.location, "translations")]
+                    )
                     for dirname in dirs:
                         if not os.path.isdir(dirname):
                             continue
@@ -120,20 +129,21 @@ def enable_additional_translations(default_locale="en", additional_folders=None)
                             )
                         except Exception:
                             logger.exception(
-                                f"Error while trying to load translations "
-                                f"for plugin {name}"
+                                "Error while trying to load translations "
+                                "for plugin {name}".format(**locals())
                             )
                         else:
                             if isinstance(plugin_translations, support.Translations):
                                 translations = translations.merge(plugin_translations)
                                 logger.debug(
-                                    f"Using translation plugin folder {dirname} from "
-                                    f"plugin {name} for locale {locale}"
+                                    "Using translation plugin folder {dirname} from "
+                                    "plugin {name} for locale {locale}".format(**locals())
                                 )
                                 break
                     else:
                         logger.debug(
-                            f"No translations for locale {locale} " f"from plugin {name}"
+                            "No translations for locale {locale} "
+                            "from plugin {name}".format(**locals())
                         )
 
                 # core translations
@@ -144,12 +154,14 @@ def enable_additional_translations(default_locale="en", additional_folders=None)
                     core_translations = support.Translations.load(dirname, [locale])
                     if isinstance(core_translations, support.Translations):
                         logger.debug(
-                            f"Using translation core folder {dirname} "
-                            f"for locale {locale}"
+                            "Using translation core folder {dirname} "
+                            "for locale {locale}".format(**locals())
                         )
                         break
                 else:
-                    logger.debug(f"No translations for locale {locale} in core folders")
+                    logger.debug(
+                        "No translations for locale {} in core folders".format(locale)
+                    )
                 translations = translations.merge(core_translations)
 
             ctx.babel_translations = translations
@@ -157,6 +169,81 @@ def enable_additional_translations(default_locale="en", additional_folders=None)
 
     flask_babel.Babel.list_translations = fixed_list_translations
     flask_babel.get_translations = fixed_get_translations
+
+
+def fix_webassets_cache():
+    from webassets import cache
+
+    error_logger = logging.getLogger(__name__ + ".fix_webassets_cache")
+
+    def fixed_set(self, key, data):
+        import os
+        import pickle
+        import shutil
+        import tempfile
+
+        if not os.path.exists(self.directory):
+            error_logger.warning(
+                "Cache directory {} doesn't exist, not going "
+                "to attempt to write cache file".format(self.directory)
+            )
+
+        md5 = "%s" % cache.make_md5(self.V, key)
+        filename = os.path.join(self.directory, md5)
+        fd, temp_filename = tempfile.mkstemp(prefix="." + md5, dir=self.directory)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                pickle.dump(data, f)
+                f.flush()
+            shutil.move(temp_filename, filename)
+        except Exception:
+            os.remove(temp_filename)
+            raise
+
+    def fixed_get(self, key):
+        import errno
+        import os
+        import warnings
+
+        from webassets.cache import make_md5
+
+        if not os.path.exists(self.directory):
+            error_logger.warning(
+                "Cache directory {} doesn't exist, not going "
+                "to attempt to read cache file".format(self.directory)
+            )
+            return None
+
+        try:
+            hash = make_md5(self.V, key)
+        except IOError as e:
+            if e.errno != errno.ENOENT:
+                raise
+            return None
+
+        filename = os.path.join(self.directory, "%s" % hash)
+        try:
+            f = io.open(filename, "rb")
+        except IOError as e:
+            if e.errno != errno.ENOENT:
+                error_logger.exception(
+                    "Got an exception while trying to open webasset file {}".format(
+                        filename
+                    )
+                )
+            return None
+        try:
+            result = f.read()
+        finally:
+            f.close()
+
+        unpickled = webassets.cache.safe_unpickle(result)
+        if unpickled is None:
+            warnings.warn("Ignoring corrupted cache file %s" % filename)
+        return unpickled
+
+    cache.FilesystemCache.set = fixed_set
+    cache.FilesystemCache.get = fixed_get
 
 
 def fix_webassets_filtertool():
@@ -229,7 +316,7 @@ def fix_flask_jsonify():
 # ~~ WSGI environment wrapper for reverse proxying
 
 
-class ReverseProxiedEnvironment:
+class ReverseProxiedEnvironment(object):
     @staticmethod
     def to_header_candidates(values):
         if values is None:
@@ -512,37 +599,7 @@ class OctoPrintSessionInterface(flask.sessions.SecureCookieSessionInterface):
     def save_session(self, app, session, response):
         if flask.g.get("login_via_apikey", False):
             return
-        return super().save_session(app, session, response)
-
-
-# ~~ jinja environment
-
-
-class PrefixAwareJinjaEnvironment(flask.templating.Environment):
-    def __init__(self, *args, **kwargs):
-        flask.templating.Environment.__init__(self, *args, **kwargs)
-        self.prefix_loader = None
-        self._cached_templates = {}
-
-    def join_path(self, template, parent):
-        if parent and "/" in parent:
-            prefix, _ = parent.split("/", 1)
-            if template in self._templates_for_prefix(prefix) and not template.startswith(
-                prefix + "/"
-            ):
-                return prefix + "/" + template
-
-        return template
-
-    def _templates_for_prefix(self, prefix):
-        if prefix in self._cached_templates:
-            return self._cached_templates[prefix]
-
-        templates = []
-        if prefix in self.prefix_loader.mapping:
-            templates = self.prefix_loader.mapping[prefix].list_templates()
-        self._cached_templates[prefix] = templates
-        return templates
+        return super(OctoPrintSessionInterface, self).save_session(app, session, response)
 
 
 # ~~ passive login helper
@@ -568,7 +625,7 @@ def _local_networks():
                 continue
 
             local_networks.add(network)
-            logger.debug(f"Added network {network} to localNetworks")
+            logger.debug("Added network {} to localNetworks".format(network))
 
             if network.version == 4:
                 network_v6 = network.ipv6()
@@ -617,7 +674,9 @@ def passive_login():
     def determine_user(u):
         if not u.is_anonymous and u.is_active:
             # known active user
-            logger.info(f"Passively logging in user {u.get_id()} from {remote_address}")
+            logger.info(
+                "Passively logging in user {} from {}".format(u.get_id(), remote_address)
+            )
 
         elif (
             settings().getBoolean(["accessControl", "autologinLocal"])
@@ -896,7 +955,7 @@ def cache_check_status_code(response, valid):
         return response.status_code not in valid
 
 
-class PreemptiveCache:
+class PreemptiveCache(object):
     def __init__(self, cachefile):
         self.cachefile = cachefile
         self.environment = None
@@ -949,7 +1008,9 @@ class PreemptiveCache:
                 entries = cleanup_function(root, entries)
                 if not entries:
                     del all_data[root]
-                    self._logger.debug(f"Removed root {root} from preemptive cache")
+                    self._logger.debug(
+                        "Removed root {} from preemptive cache".format(root)
+                    )
                 elif len(entries) < old_count:
                     all_data[root] = entries
                     self._logger.debug(
@@ -962,17 +1023,20 @@ class PreemptiveCache:
         return all_data
 
     def get_all_data(self):
+        import yaml
+
         cache_data = None
         with self._lock:
             try:
-                cache_data = yaml.load_from_file(path=self.cachefile)
-            except OSError as e:
+                with io.open(self.cachefile, "rt") as f:
+                    cache_data = yaml.safe_load(f)
+            except IOError as e:
                 import errno
 
                 if e.errno != errno.ENOENT:
                     raise
             except Exception:
-                self._logger.exception(f"Error while reading {self.cachefile}")
+                self._logger.exception("Error while reading {}".format(self.cachefile))
 
         if cache_data is None:
             cache_data = {}
@@ -988,14 +1052,22 @@ class PreemptiveCache:
         return cache_data.get(root, list())
 
     def set_all_data(self, data):
+        import yaml
+
         from octoprint.util import atomic_write
 
         with self._lock:
             try:
                 with atomic_write(self.cachefile, "wt", max_permissions=0o666) as handle:
-                    yaml.save_to_file(data, file=handle, pretty=True)
+                    yaml.safe_dump(
+                        data,
+                        handle,
+                        default_flow_style=False,
+                        indent=2,
+                        allow_unicode=True,
+                    )
             except Exception:
-                self._logger.exception(f"Error while writing {self.cachefile}")
+                self._logger.exception("Error while writing {}".format(self.cachefile))
 
     def set_data(self, root, data):
         with self._lock:
@@ -1044,12 +1116,12 @@ class PreemptiveCache:
                 to_persist = copy.deepcopy(data)
                 to_persist["_timestamp"] = time.time()
                 to_persist["_count"] = 1
-                self._logger.info(f"Adding entry for {root} and {to_persist!r}")
+                self._logger.info("Adding entry for {} and {!r}".format(root, to_persist))
             else:
                 to_persist["_timestamp"] = time.time()
                 to_persist["_count"] = to_persist.get("_count", 0) + 1
                 self._logger.debug(
-                    f"Updating timestamp and counter for {root} and {data!r}"
+                    "Updating timestamp and counter for {} and {!r}".format(root, data)
                 )
 
             self.set_data(root, [to_persist] + other)
@@ -1088,7 +1160,7 @@ def preemptively_cached(cache, data, unless=None):
                 cache.record(data, unless=unless)
             except Exception:
                 logging.getLogger(__name__).exception(
-                    f"Error while recording preemptive cache entry: {data!r}"
+                    "Error while recording preemptive cache entry: {!r}".format(data)
                 )
             return f(*args, **kwargs)
 
@@ -1133,7 +1205,7 @@ def lastmodified(date):
                     if callable(result):
                         result = result(rv)
 
-                    if not isinstance(result, str):
+                    if not isinstance(result, basestring):
                         from werkzeug.http import http_date
 
                         result = http_date(result)
@@ -1252,7 +1324,7 @@ def with_revalidation_checking(
 
             # set last modified header if not already set
             if lm and response.headers.get("Last-Modified", None) is None:
-                if not isinstance(lm, str):
+                if not isinstance(lm, basestring):
                     from werkzeug.http import http_date
 
                     lm = http_date(lm)
@@ -1277,40 +1349,21 @@ def check_etag(etag):
     )
 
 
-def check_lastmodified(lastmodified: Union[int, float, datetime]) -> bool:
-    """Compares the provided lastmodified value with the value of the If-Modified-Since header.
-
-    If ``lastmodified`` is an int or float, it's assumed to be a Unix timestamp and converted
-    to a timezone aware datetime instance in UTC.
-
-    If ``lastmodified`` is a datetime instance, it needs to be timezone aware or the
-    result will always be ``False``.
-
-    Args:
-        lastmodified (Union[int, float, datetime]): The last modified value to compare against
-
-    Raises:
-        ValueError: If anything but an int, float or datetime instance is passed
-
-    Returns:
-        bool: true if the values indicate that the document is still up to date
-    """
-
+def check_lastmodified(lastmodified):
     if lastmodified is None:
         return False
 
-    if isinstance(lastmodified, (int, float)):
+    from datetime import datetime
+
+    if isinstance(lastmodified, (int, long, float)):
         # max(86400, lastmodified) is workaround for https://bugs.python.org/issue29097,
         # present in CPython 3.6.x up to 3.7.1.
         #
         # I think it's fair to say that we'll never encounter lastmodified values older than
         # 1970-01-02 so this is a safe workaround.
-        #
-        # Timestamps are defined as seconds since epoch aka 1970/01/01 00:00:00Z, so we
-        # use UTC as timezone here.
-        lastmodified = datetime.fromtimestamp(
-            max(86400, lastmodified), tz=UTC_TZ
-        ).replace(microsecond=0)
+        lastmodified = datetime.fromtimestamp(max(86400, lastmodified)).replace(
+            microsecond=0
+        )
 
     if not isinstance(lastmodified, datetime):
         raise ValueError(
@@ -1318,15 +1371,6 @@ def check_lastmodified(lastmodified: Union[int, float, datetime]) -> bool:
                 lastmodified.__class__
             )
         )
-
-    if not is_timezone_aware(lastmodified):
-        # datetime object is not timezone aware, we can't check lastmodified with that
-        logger = logging.getLogger(__name__)
-        logger.warning(
-            "lastmodified is not timezone aware, cannot check against If-Modified-Since. In the future this will become an error!",
-            stack_info=logger.isEnabledFor(logging.DEBUG),
-        )
-        return False
 
     return (
         flask.request.method in ("GET", "HEAD")
@@ -1776,20 +1820,24 @@ def collect_plugin_assets(preferred_stylesheet="css"):
             for asset in all_assets["js"]:
                 if not asset_exists("js", asset):
                     continue
-                assets[asset_key]["js"][name].append(f"plugin/{name}/{asset}")
+                assets[asset_key]["js"][name].append(
+                    "plugin/{name}/{asset}".format(**locals())
+                )
 
         if "clientjs" in all_assets:
             for asset in all_assets["clientjs"]:
                 if not asset_exists("clientjs", asset):
                     continue
-                assets[asset_key]["clientjs"][name].append(f"plugin/{name}/{asset}")
+                assets[asset_key]["clientjs"][name].append(
+                    "plugin/{name}/{asset}".format(**locals())
+                )
 
         if preferred_stylesheet in all_assets:
             for asset in all_assets[preferred_stylesheet]:
                 if not asset_exists(preferred_stylesheet, asset):
                     continue
                 assets[asset_key][preferred_stylesheet][name].append(
-                    f"plugin/{name}/{asset}"
+                    "plugin/{name}/{asset}".format(**locals())
                 )
         else:
             for stylesheet in supported_stylesheets:
@@ -1799,7 +1847,9 @@ def collect_plugin_assets(preferred_stylesheet="css"):
                 for asset in all_assets[stylesheet]:
                     if not asset_exists(stylesheet, asset):
                         continue
-                    assets[asset_key][stylesheet][name].append(f"plugin/{name}/{asset}")
+                    assets[asset_key][stylesheet][name].append(
+                        "plugin/{name}/{asset}".format(**locals())
+                    )
                 break
 
     return assets

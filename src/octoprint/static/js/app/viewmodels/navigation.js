@@ -32,12 +32,9 @@ $(function () {
             return classes;
         });
 
-        self.onServerReconnect =
-            self.onServerConnect =
-            self.onEventConnectivityChanged =
-                function () {
-                    self.offline(!ONLINE);
-                };
+        self.onServerReconnect = self.onServerConnect = self.onEventConnectivityChanged = function () {
+            self.offline(!ONLINE);
+        };
     }
 
     OCTOPRINT_VIEWMODELS.push({

@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2021 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
@@ -12,7 +15,7 @@ def _sfn_really_universal(name):
     ### taken from pathvalidate library
 
     _WINDOWS_RESERVED_FILE_NAMES = ("CON", "PRN", "AUX", "CLOCK$", "NUL") + tuple(
-        f"{name:s}{num:d}"
+        "{:s}{:d}".format(name, num)
         for name, num in itertools.product(("COM", "LPT"), range(1, 10))
     )
     _MACOS_RESERVED_FILE_NAMES = (":",)
@@ -28,20 +31,19 @@ def sanitize_filename(name, really_universal=False):
     """
     Sanitizes the provided filename. Implementation differs between Python versions.
 
-    Under normal operation, ``pathvalidate.sanitize_filename`` will be used, leaving the
+    On Python 2, the name will be ASCII-fied, using ``octoprint.util.text.sanitize`` with
+    safe chars ``-_.()[] `` and all spaces replaced by ``_``.
+
+    On Python 3, ``pathvalidate.sanitize_filename`` will be used instead, leaving the
     name as intact as possible while still being a legal file name under all operating
     systems.
-
-    Behaviour can be changed by setting ``really_universal`` to ``True``. In this case,
-    the name will be ASCII-fied, using ``octoprint.util.text.sanitize`` with
-    safe chars ``-_.()[] `` and all spaces replaced by ``_``. This is the old behaviour.
 
     In all cases, a single leading ``.`` will be removed (as it denotes hidden files
     on *nix).
 
     Args:
         name:          The file name to sanitize. Only the name, no path elements.
-        really_universal: If ``True``, the old method of sanitization will always
+        really_universal: If ``True``, the Python 2 method of sanitization will always
                           be used. Defaults to ``False``.
 
     Returns:
@@ -57,7 +59,10 @@ def sanitize_filename(name, really_universal=False):
     if "/" in name or "\\" in name:
         raise ValueError("name must not contain / or \\")
 
-    from pathvalidate import sanitize_filename as sfn
+    try:
+        from pathvalidate import sanitize_filename as sfn
+    except ImportError:
+        sfn = _sfn_really_universal
 
     if really_universal:
         result = _sfn_really_universal(name)
@@ -96,24 +101,24 @@ def get_dos_filename(
 
     Examples:
 
-        >>> get_dos_filename("test1234.gco")
+        >>> get_dos_filename("test1234.gco") # doctest: +ALLOW_UNICODE
         'test1234.gco'
-        >>> get_dos_filename("test1234.gcode")
+        >>> get_dos_filename("test1234.gcode") # doctest: +ALLOW_UNICODE
         'test1234.gco'
-        >>> get_dos_filename("test12345.gco")
+        >>> get_dos_filename("test12345.gco") # doctest: +ALLOW_UNICODE
         'test12~1.gco'
-        >>> get_dos_filename("Wölfe 🐺.gcode")
+        >>> get_dos_filename("Wölfe 🐺.gcode") # doctest: +ALLOW_UNICODE
         'wolfe_~1.gco'
-        >>> get_dos_filename("💚.gcode")
+        >>> get_dos_filename("💚.gcode") # doctest: +ALLOW_UNICODE
         'green_~1.gco'
-        >>> get_dos_filename("test1234.fnord", extension="gco")
+        >>> get_dos_filename("test1234.fnord", extension="gco") # doctest: +ALLOW_UNICODE
         'test1234.gco'
-        >>> get_dos_filename("auto0.g", extension="gco")
+        >>> get_dos_filename("auto0.g", extension="gco") # doctest: +ALLOW_UNICODE
         'auto0.gco'
-        >>> get_dos_filename("auto0.g", extension="gco", whitelisted_extensions=["g"])
+        >>> get_dos_filename("auto0.g", extension="gco", whitelisted_extensions=["g"]) # doctest: +ALLOW_UNICODE
         'auto0.g'
         >>> get_dos_filename(None)
-        >>> get_dos_filename("foo")
+        >>> get_dos_filename("foo") # doctest: +ALLOW_UNICODE
         'foo'
     """
 
@@ -187,30 +192,30 @@ def find_collision_free_name(filename, extension, existing_filenames, max_power=
 
     Examples:
 
-        >>> find_collision_free_name("test1234", "gco", [])
+        >>> find_collision_free_name("test1234", "gco", []) # doctest: +ALLOW_UNICODE
         'test1234.gco'
-        >>> find_collision_free_name("test1234", "gcode", [])
+        >>> find_collision_free_name("test1234", "gcode", []) # doctest: +ALLOW_UNICODE
         'test1234.gco'
-        >>> find_collision_free_name("test12345", "gco", [])
+        >>> find_collision_free_name("test12345", "gco", []) # doctest: +ALLOW_UNICODE
         'test12~1.gco'
-        >>> find_collision_free_name("test 123", "gco", [])
+        >>> find_collision_free_name("test 123", "gco", []) # doctest: +ALLOW_UNICODE
         'test_123.gco'
-        >>> find_collision_free_name("test1234", "g o", [])
+        >>> find_collision_free_name("test1234", "g o", []) # doctest: +ALLOW_UNICODE
         'test1234.g_o'
-        >>> find_collision_free_name("test12345", "gco", ["/test12~1.gco"])
+        >>> find_collision_free_name("test12345", "gco", ["/test12~1.gco"]) # doctest: +ALLOW_UNICODE
         'test12~2.gco'
         >>> many_files = ["/test12~{}.gco".format(x) for x in range(10)[1:]]
-        >>> find_collision_free_name("test12345", "gco", many_files)
+        >>> find_collision_free_name("test12345", "gco", many_files) # doctest: +ALLOW_UNICODE
         'test1~10.gco'
         >>> many_more_files = many_files + ["/test1~{}.gco".format(x) for x in range(10, 99)]
-        >>> find_collision_free_name("test12345", "gco", many_more_files)
+        >>> find_collision_free_name("test12345", "gco", many_more_files) # doctest: +ALLOW_UNICODE
         'test1~99.gco'
         >>> many_more_files_plus_one = many_more_files + ["/test1~99.gco"]
-        >>> find_collision_free_name("test12345", "gco", many_more_files_plus_one)
+        >>> find_collision_free_name("test12345", "gco", many_more_files_plus_one) # doctest: +ALLOW_UNICODE
         Traceback (most recent call last):
         ...
         ValueError: Can't create a collision free filename
-        >>> find_collision_free_name("test12345", "gco", many_more_files_plus_one, max_power=3)
+        >>> find_collision_free_name("test12345", "gco", many_more_files_plus_one, max_power=3) # doctest: +ALLOW_UNICODE
         'test~100.gco'
 
     """
@@ -244,7 +249,7 @@ def find_collision_free_name(filename, extension, existing_filenames, max_power=
     counter = 1
     power = 1
     prefix_format = "{segment}~{counter}"
-    while counter < (10**max_power):
+    while counter < (10 ** max_power):
         prefix = prefix_format.format(
             segment=filename[: (6 - power + 1)], counter=str(counter)
         )
@@ -252,7 +257,7 @@ def find_collision_free_name(filename, extension, existing_filenames, max_power=
         if result not in existing_filenames:
             return result
         counter += 1
-        if counter >= 10**power:
+        if counter >= 10 ** power:
             power += 1
 
     raise ValueError("Can't create a collision free filename")

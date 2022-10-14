@@ -437,10 +437,8 @@ GCODE.renderer = (function () {
         canvas.addEventListener(
             "mousedown",
             function (event) {
-                document.body.style.mozUserSelect =
-                    document.body.style.webkitUserSelect =
-                    document.body.style.userSelect =
-                        "none";
+                document.body.style.mozUserSelect = document.body.style.webkitUserSelect = document.body.style.userSelect =
+                    "none";
 
                 // remember starting point of dragging gesture
                 lastX = (event.offsetX || event.pageX - canvas.offsetLeft) * pixelRatio;
@@ -619,19 +617,12 @@ GCODE.renderer = (function () {
         ctx.circle(0, 0, 2);
         ctx.stroke();
 
-        //~~ grid starting from origin
         ctx.strokeStyle = renderOptions["colorGrid"];
-        var gridline = 0;
-        for (x = 0; x <= maxX; x += gridStep) {
-            ctx.beginPath();
-            if (gridline % 5 === 0) {
-                // every fifth line, including the center
-                ctx.lineWidth = 1.5 * lineWidthFactor;
-            } else {
-                ctx.lineWidth = lineWidthFactor;
-            }
-            gridline += 1;
+        ctx.lineWidth = lineWidthFactor;
 
+        //~~ grid starting from origin
+        ctx.beginPath();
+        for (x = 0; x <= maxX; x += gridStep) {
             ctx.moveTo(x, minY);
             ctx.lineTo(x, maxY);
 
@@ -639,20 +630,11 @@ GCODE.renderer = (function () {
                 ctx.moveTo(-1 * x, minY);
                 ctx.lineTo(-1 * x, maxY);
             }
-            ctx.stroke();
         }
+        ctx.stroke();
 
-        gridline = 0;
+        ctx.beginPath();
         for (y = 0; y <= maxY; y += gridStep) {
-            ctx.beginPath();
-            if (gridline % 5 === 0) {
-                // every fifth line, including the center
-                ctx.lineWidth = 1.5 * lineWidthFactor;
-            } else {
-                ctx.lineWidth = lineWidthFactor;
-            }
-            gridline += 1;
-
             ctx.moveTo(minX, y);
             ctx.lineTo(maxX, y);
 
@@ -660,8 +642,8 @@ GCODE.renderer = (function () {
                 ctx.moveTo(minX, -1 * y);
                 ctx.lineTo(maxX, -1 * y);
             }
-            ctx.stroke();
         }
+        ctx.stroke();
     };
 
     var drawCircularGrid = function () {

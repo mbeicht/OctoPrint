@@ -246,7 +246,7 @@ $(function () {
                     name = slicer.key;
                 }
 
-                if (slicer.configured) {
+                if (slicer.default && slicer.configured) {
                     selectedSlicer = slicer.key;
                 }
 
@@ -323,12 +323,9 @@ $(function () {
             return name.replace(/[^a-zA-Z0-9\-_\.\(\) ]/g, "").replace(/ /g, "_");
         };
 
-        self.onUserPermissionsChanged =
-            self.onUserLoggedIn =
-            self.onUserLoggedOut =
-                function () {
-                    self.requestData();
-                };
+        self.onUserPermissionsChanged = self.onUserLoggedIn = self.onUserLoggedOut = function () {
+            self.requestData();
+        };
 
         self.onEventSettingsUpdated = function (payload) {
             self.requestData();

@@ -8,6 +8,7 @@ var gcode;
 var firstReport;
 var toolOffsets = [{x: 0, y: 0}];
 var g90InfluencesExtruder = false;
+var z_heights = {};
 var model = [];
 var max = {x: undefined, y: undefined, z: undefined};
 var min = {x: undefined, y: undefined, z: undefined};
@@ -37,23 +38,35 @@ var layerCnt = 0;
 var speeds = {extrude: [], retract: [], move: []};
 var speedsByLayer = {extrude: {}, retract: {}, move: {}};
 
-var sendLayersToParent = function (layers, progress) {
-    var l = [];
-    for (var i = 0; i < layers.length; i++) {
-        if (model[layers[i]]) l.push(layers[i]);
-    }
+var sendLayerToParent = function (layerNum, z, progress) {
+    self.postMessage({
+        cmd: "returnLayer",
+        msg: {
+            cmds: model[layerNum],
+            layerNum: layerNum,
+            zHeightObject: {zValue: z, layer: z_heights[z]},
+            isEmpty: false,
+            progress: progress
+        }
+    });
+};
 
-    var m = [];
-    for (var i = 0; i < l.length; i++) {
-        if (!model[l[i]]) continue;
-        m[l[i]] = model[l[i]];
+var sendMultiLayerToParent = function (layerNum, z, progress) {
+    var tmpModel = [];
+    var tmpZHeight = {};
+
+    for (var i = 0; i < layerNum.length; i++) {
+        tmpModel[layerNum[i]] = model[layerNum[i]];
+        tmpZHeight[layerNum[i]] = z_heights[z[i]];
     }
 
     self.postMessage({
-        cmd: "returnLayers",
+        cmd: "returnMultiLayer",
         msg: {
-            model: m,
-            layers: l,
+            model: tmpModel,
+            layerNum: layerNum,
+            zHeightObject: {zValue: z, layer: tmpZHeight},
+            isEmpty: false,
             progress: progress
         }
     });
@@ -303,9 +316,10 @@ var analyzeModel = function () {
 
 var doParse = function () {
     var argChar, numSlice;
-    var activeLayer = undefined;
     var sendLayer = undefined;
+    var sendLayerZ = 0;
     var sendMultiLayer = [];
+    var sendMultiLayerZ = [];
     var lastSend = 0;
 
     var layer = 0;
@@ -324,8 +338,6 @@ var doParse = function () {
     var relativeMode = false;
     var zLift = false;
     var zLiftZ = undefined;
-    var maxLiftZ = undefined;
-    var zLiftLayer = undefined;
     var zLiftMoves = [];
 
     var dcExtrude = false;
@@ -366,7 +378,9 @@ var doParse = function () {
         var addToModel = false;
         var move = false;
 
-        if (/^(?:G0|G1|G2|G3|G00|G01|G02|G03)(\.\d+)?\s/i.test(line)) {
+        var log = false;
+
+        if (/^(?:G0|G1|G2|G3)(\.\d+)?\s/i.test(line)) {
             args = line.split(/\s/);
 
             for (j = 0; j < args.length; j++) {
@@ -587,25 +601,35 @@ var doParse = function () {
             if (!activeToolOffset) activeToolOffset = {x: 0, y: 0};
         }
 
-        if (typeof z !== "undefined" && z !== prevZ) {
-            if (!extrude && !zLift) {
-                // possible z-lift
-                zLift = true;
-                zLiftZ = maxLiftZ = prevZ;
-                zLiftLayer = layer;
-            }
-
-            if (zLift && z > maxLiftZ) {
-                maxLiftZ = z;
-            }
-
-            layer = model.length;
-            prevZ = z;
+        // If move is on a new height and it's not extruding and
+        // it's not currently already in a Z-lift, assume it's possibly a Z-lift
+        if (typeof z !== "undefined" && z !== prevZ && !extrude && !zLift) {
+            zLift = true;
+            zLiftZ = prevZ;
+        }
+        // We're extruding, Z-lift is over
+        if (extrude) {
+            zLift = false;
         }
 
-        if (extrude) {
-            // extrude = z-lift over
-            zLift = false;
+        if (typeof z !== "undefined" && z !== prevZ) {
+            if (z_heights[z] !== undefined) {
+                layer = z_heights[z];
+            } else {
+                layer = model.length;
+                z_heights[z] = layer;
+            }
+
+            sendLayer = layer;
+            sendLayerZ = z;
+            prevZ = z;
+        } else if (typeof z === "undefined" && typeof prevZ !== "undefined") {
+            if (z_heights.hasOwnProperty(prevZ)) {
+                layer = z_heights[prevZ];
+            } else {
+                layer = model.length;
+                z_heights[prevZ] = layer;
+            }
         }
 
         if (addToModel) {
@@ -628,68 +652,31 @@ var doParse = function () {
                 prevY: prevY,
                 prevZ: prevZ,
                 speed: lastF,
-                gcodeLine: i + 1,
+                gcodeLine: i,
                 percentage: percentage,
                 tool: tool
             };
 
             if (zLift) {
-                // Insert zLift moves for later processing - they might be part of
-                // the active layer still
+                // Insert zLift moves for later processing
                 zLiftMoves.push({
                     command: command,
                     layer: layer
                 });
-            } else {
-                if (zLiftMoves.length > 0) {
-                    // there's something to be checked in the Z-lift cache
-                    if (prevZ < maxLiftZ) {
-                        zLiftMoves.forEach(function (zLiftMove) {
-                            // move command from move layer...
-                            model[zLiftMove.layer].splice(
-                                model[layer].indexOf(zLiftMove.command),
-                                1
-                            );
-                            // ... to z-lift layer
-                            model[zLiftLayer].push(zLiftMove.command);
-                        });
-
-                        // clean up empty layers at the end of the model
-                        var spliceFrom = undefined;
-                        for (var l = model.length - 1; l > 0; l--) {
-                            if (model[l].length > 0) break;
-                            spliceFrom = l;
-                        }
-                        if (spliceFrom !== undefined) {
-                            model.splice(spliceFrom, model.length - spliceFrom);
-                        }
-
-                        // finally determine the new active layer
-                        if (prevZ === zLiftZ) {
-                            // initial lifted on layer if we are back at a prior height
-                            layer = zLiftLayer;
-                        } else {
-                            // new layer if this a new z, just lower than max z-lift
-                            model[model.length] = [];
-                            layer = model.length - 1;
-                        }
-                    }
-
-                    // clear up cached Z-lift moves
-                    zLiftMoves = [];
-                    zLiftZ = undefined;
-                    maxLiftZ = undefined;
-                    zLiftLayer = undefined;
+            } else if (zLiftMoves.length > 0) {
+                // there's something to be checked in the Z-lift cache
+                if (prevZ === zLiftZ) {
+                    zLiftMoves.forEach(function (zLiftMove) {
+                        model[zLiftMove.layer].splice(
+                            model[layer].indexOf(zLiftMove.command),
+                            1
+                        );
+                        model[z_heights[zLiftZ]].push(zLiftMove.command);
+                    });
                 }
-
-                // have we progressed a layer?
-                if (activeLayer === undefined || layer > activeLayer) {
-                    // the formerly active layer is now done and can be sent
-                    sendLayer = activeLayer;
-
-                    // the current layer is the new active layer
-                    activeLayer = layer;
-                }
+                // clear up cached Z-lift moves
+                zLiftMoves = [];
+                zLiftZ = undefined;
             }
 
             model[layer].push(command);
@@ -703,24 +690,21 @@ var doParse = function () {
         if (typeof sendLayer !== "undefined") {
             if (i - lastSend > gcode.length * 0.02 && sendMultiLayer.length !== 0) {
                 lastSend = i;
-                sendLayersToParent(sendMultiLayer, (i / gcode.length) * 100);
+                sendMultiLayerToParent(
+                    sendMultiLayer,
+                    sendMultiLayerZ,
+                    (i / gcode.length) * 100
+                );
                 sendMultiLayer = [];
                 sendMultiLayerZ = [];
             }
-
-            if (sendMultiLayer.indexOf(sendLayer) === -1) {
-                sendMultiLayer.push(sendLayer);
-            }
-
+            sendMultiLayer[sendMultiLayer.length] = sendLayer;
+            sendMultiLayerZ[sendMultiLayerZ.length] = sendLayerZ;
             sendLayer = undefined;
+            sendLayerZ = undefined;
         }
     }
-
-    // we are done, send the final layer
-    if (sendMultiLayer.indexOf(activeLayer) === -1) {
-        sendMultiLayer.push(activeLayer);
-    }
-    sendLayersToParent(sendMultiLayer, 100);
+    sendMultiLayerToParent(sendMultiLayer, sendMultiLayerZ, (i / gcode.length) * 100);
 };
 
 var parseGCode = function (message) {
@@ -744,8 +728,10 @@ var parseGCode = function (message) {
 var runAnalyze = function (message) {
     analyzeModel();
     model = [];
+    z_heights = [];
     gcode = undefined;
     firstReport = undefined;
+    z_heights = {};
     model = [];
     max = {x: undefined, y: undefined, z: undefined};
     min = {x: undefined, y: undefined, z: undefined};

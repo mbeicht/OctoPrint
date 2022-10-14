@@ -1,15 +1,22 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __author__ = "Marc Hannappel <salandora@gmail.com>"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2017 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
+import io
 import logging
 import os
 from functools import partial
 
+import yaml
+from past.builtins import basestring
+
 from octoprint.access import ADMIN_GROUP, GUEST_GROUP, READONLY_GROUP, USER_GROUP
 from octoprint.access.permissions import OctoPrintPermission, Permissions
 from octoprint.settings import settings
-from octoprint.util import atomic_write, yaml
+from octoprint.util import atomic_write
 from octoprint.vendor.flask_principal import Need, Permission
 
 GroupNeed = partial(Need, "group")
@@ -19,10 +26,10 @@ GroupNeed.__doc__ = """A need with the method preset to `"group"`."""
 class GroupPermission(Permission):
     def __init__(self, key):
         need = GroupNeed(key)
-        super().__init__(need)
+        super(GroupPermission, self).__init__(need)
 
 
-class GroupManager:
+class GroupManager(object):
     @classmethod
     def default_permissions_for_group(cls, group):
         result = []
@@ -170,9 +177,10 @@ class GroupManager:
         return list(filter(lambda x: x is not None, [self._to_group(g) for g in groups]))
 
     def _to_group(self, group):
+        # noinspection PyCompatibility
         if isinstance(group, Group):
             return group
-        elif isinstance(group, str):
+        elif isinstance(group, basestring):
             return self.find_group(group)
         elif isinstance(group, dict):
             return self.find_group(group.get("key"))
@@ -180,17 +188,17 @@ class GroupManager:
             return None
 
     def _notify_listeners(self, action, group, *args, **kwargs):
-        method = f"on_group_{action}"
+        method = "on_group_{}".format(action)
         for listener in self._group_change_listeners:
             try:
                 getattr(listener, method)(group, *args, **kwargs)
             except Exception:
                 self._logger.exception(
-                    f"Error notifying listener {listener!r} via {method}"
+                    "Error notifying listener {!r} via {}".format(listener, method)
                 )
 
 
-class GroupChangeListener:
+class GroupChangeListener(object):
     def on_group_added(self, group):
         pass
 
@@ -224,7 +232,8 @@ class FilebasedGroupManager(GroupManager):
     def _load(self):
         if os.path.exists(self._groupfile) and os.path.isfile(self._groupfile):
             try:
-                data = yaml.load_from_file(path=self._groupfile)
+                with io.open(self._groupfile, "rt", encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
 
                 if "groups" not in data:
                     groups = data
@@ -312,7 +321,7 @@ class FilebasedGroupManager(GroupManager):
 
             except Exception:
                 self._logger.exception(
-                    f"Error while loading groups from file {self._groupfile}"
+                    "Error while loading groups from file {}".format(self._groupfile)
                 )
 
     def _save(self, force=False):
@@ -340,7 +349,11 @@ class FilebasedGroupManager(GroupManager):
         with atomic_write(
             self._groupfile, mode="wt", permissions=0o600, max_permissions=0o666
         ) as f:
-            yaml.save_to_file(data, file=f, pretty=True)
+            import yaml
+
+            yaml.safe_dump(
+                data, f, default_flow_style=False, indent=2, allow_unicode=True
+            )
             self._dirty = False
         self._load()
 
@@ -516,7 +529,7 @@ class GroupCantBeChanged(Exception):
         Exception.__init__(self, "Group can't be changed: %s" % key)
 
 
-class Group:
+class Group(object):
     def __init__(
         self,
         key,

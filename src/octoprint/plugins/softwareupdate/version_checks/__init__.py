@@ -1,8 +1,11 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
-from ..exceptions import ApiCheckError, RateLimitCheckError
+from ..exceptions import RateLimitCheckError
 from . import (  # noqa: F401
     always_current,
     bitbucket_commit,
@@ -18,36 +21,18 @@ from . import (  # noqa: F401
 )
 
 
-class GitHubRateLimitCheckError(RateLimitCheckError):
+class GithubRateLimitCheckError(RateLimitCheckError):
     def __init__(self, remaining, ratelimit, reset):
         if reset:
-            message = f"GitHub rate limit exceeded, reset at {reset}"
+            message = "Github rate limit exceeded, reset at {}".format(reset)
         else:
-            message = "GitHub rate limit exceeded"
-        super().__init__(message, remaining=remaining, limit=ratelimit, reset=reset)
+            message = "Github rate limit exceeded"
+        super(GithubRateLimitCheckError, self).__init__(
+            message, remaining=remaining, limit=ratelimit, reset=reset
+        )
 
 
-class GitHubApiError(ApiCheckError):
-    API = "GitHub API"
-
-
-def check_github_apiresponse(logger, r, ok_codes=None):
-    if ok_codes is None:
-        ok_codes = (200,)
-
-    if r.status_code not in ok_codes:
-        try:
-            data = r.json()
-            message = data.get("message", "Unknown error")
-        except Exception:
-            message = "Not a valid JSON response"
-
-        exc = GitHubApiError(r.status_code, message)
-        logger.error(exc.message)
-        raise exc
-
-
-def check_github_ratelimit(logger, r):
+def log_github_ratelimit(logger, r):
     try:
         ratelimit = int(r.headers.get("X-RateLimit-Limit", None))
     except Exception:
@@ -75,4 +60,4 @@ def check_github_ratelimit(logger, r):
     )
 
     if remaining == 0:
-        raise GitHubRateLimitCheckError(remaining, ratelimit, reset)
+        raise GithubRateLimitCheckError(remaining, ratelimit, reset)

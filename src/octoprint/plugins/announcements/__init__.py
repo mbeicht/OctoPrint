@@ -1,12 +1,16 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2016 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
 
 import calendar
-import logging
+import io
 import os
 import re
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -24,8 +28,10 @@ from octoprint.server.util.flask import (
     no_firstrun_access,
     with_revalidation_checking,
 )
-from octoprint.util import count, deserialize, serialize, utmify
+from octoprint.util import count, monotonic_time, utmify
 from octoprint.util.text import sanitize
+
+PY2 = sys.version_info[0] < 3
 
 
 class AnnouncementPlugin(
@@ -429,24 +435,14 @@ class AnnouncementPlugin(
 
             ttl *= 60
             now = time.time()
-            if now > os.stat(channel_path).st_mtime + ttl:
-                return None
-
-            try:
-                d = deserialize(channel_path)
-                self._logger.debug(f"Loaded channel {key} from cache at {channel_path}")
+            if os.stat(channel_path).st_mtime + ttl > now:
+                d = feedparser.parse(channel_path)
+                self._logger.debug(
+                    "Loaded channel {} from cache at {}".format(key, channel_path)
+                )
                 return d
-            except Exception:
-                if self._logger.isEnabledFor(logging.DEBUG):
-                    self._logger.exception(
-                        f"Could not read channel {key} from cache at {channel_path}"
-                    )
 
-                try:
-                    os.remove(channel_path)
-                except OSError:
-                    pass
-                return None
+        return None
 
     def _get_channel_data_from_network(self, key, config):
         """Fetch channel feed from network."""
@@ -455,12 +451,12 @@ class AnnouncementPlugin(
 
         url = config["url"]
         try:
-            start = time.monotonic()
+            start = monotonic_time()
             r = requests.get(url, timeout=30)
             r.raise_for_status()
             self._logger.info(
                 "Loaded channel {} from {} in {:.2}s".format(
-                    key, config["url"], time.monotonic() - start
+                    key, config["url"], monotonic_time() - start
                 )
             )
         except Exception:
@@ -469,12 +465,11 @@ class AnnouncementPlugin(
             )
             return None
 
-        response = feedparser.parse(r.text)
-        try:
-            serialize(self._get_channel_cache_path(key), response)
-        except Exception:
-            self._logger.exception(f"Failed to cache data for channel {key}")
-        return response
+        response = r.text
+        channel_path = self._get_channel_cache_path(key)
+        with io.open(channel_path, mode="wt", encoding="utf-8") as f:
+            f.write(response)
+        return feedparser.parse(response)
 
     def _to_internal_feed(self, feed, read_until=None):
         """Convert feed to internal data structure."""
@@ -526,7 +521,7 @@ class AnnouncementPlugin(
         """Retrieve cache path for channel key."""
 
         safe_key = sanitize(key)
-        return os.path.join(self.get_plugin_data_folder(), f"{safe_key}.cache")
+        return os.path.join(self.get_plugin_data_folder(), "{}.cache".format(safe_key))
 
 
 _image_tag_re = re.compile(r"<img.*?/?>")
@@ -534,11 +529,11 @@ _image_tag_re = re.compile(r"<img.*?/?>")
 
 def _strip_images(text):
     """
-    >>> _strip_images("<a href='test.html'>I'm a link</a> and this is an image: <img src='foo.jpg' alt='foo'>")
+    >>> _strip_images("<a href='test.html'>I'm a link</a> and this is an image: <img src='foo.jpg' alt='foo'>") # doctest: +ALLOW_UNICODE
     "<a href='test.html'>I'm a link</a> and this is an image: "
-    >>> _strip_images("One <img src=\\"one.jpg\\"> and two <img src='two.jpg' > and three <img src=three.jpg> and four <img src=\\"four.png\\" alt=\\"four\\">")
+    >>> _strip_images("One <img src=\\"one.jpg\\"> and two <img src='two.jpg' > and three <img src=three.jpg> and four <img src=\\"four.png\\" alt=\\"four\\">") # doctest: +ALLOW_UNICODE
     'One  and two  and three  and four '
-    >>> _strip_images("No images here")
+    >>> _strip_images("No images here") # doctest: +ALLOW_UNICODE
     'No images here'
     """
     return _image_tag_re.sub("", text)
@@ -547,9 +542,9 @@ def _strip_images(text):
 def _replace_images(text, callback):
     """
     >>> callback = lambda img: "foobar"
-    >>> _replace_images("<a href='test.html'>I'm a link</a> and this is an image: <img src='foo.jpg' alt='foo'>", callback)
+    >>> _replace_images("<a href='test.html'>I'm a link</a> and this is an image: <img src='foo.jpg' alt='foo'>", callback) # doctest: +ALLOW_UNICODE
     "<a href='test.html'>I'm a link</a> and this is an image: foobar"
-    >>> _replace_images("One <img src=\\"one.jpg\\"> and two <img src='two.jpg' > and three <img src=three.jpg> and four <img src=\\"four.png\\" alt=\\"four\\">", callback)
+    >>> _replace_images("One <img src=\\"one.jpg\\"> and two <img src='two.jpg' > and three <img src=three.jpg> and four <img src=\\"four.png\\" alt=\\"four\\">", callback) # doctest: +ALLOW_UNICODE
     'One foobar and two foobar and three foobar and four foobar'
     """
     result = text
@@ -565,13 +560,13 @@ _image_src_re = re.compile(r'src=(?P<quote>[\'"]*)(?P<src>.*?)(?P=quote)(?=\s+|>
 
 def _lazy_images(text, placeholder=None):
     """
-    >>> _lazy_images("<a href='test.html'>I'm a link</a> and this is an image: <img src='foo.jpg' alt='foo'>")
+    >>> _lazy_images("<a href='test.html'>I'm a link</a> and this is an image: <img src='foo.jpg' alt='foo'>") # doctest: +ALLOW_UNICODE
     '<a href=\\'test.html\\'>I\\'m a link</a> and this is an image: <img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" data-src=\\'foo.jpg\\' alt=\\'foo\\'>'
-    >>> _lazy_images("<a href='test.html'>I'm a link</a> and this is an image: <img src='foo.jpg' alt='foo'>", placeholder="ph.png")
+    >>> _lazy_images("<a href='test.html'>I'm a link</a> and this is an image: <img src='foo.jpg' alt='foo'>", placeholder="ph.png") # doctest: +ALLOW_UNICODE
     '<a href=\\'test.html\\'>I\\'m a link</a> and this is an image: <img src="ph.png" data-src=\\'foo.jpg\\' alt=\\'foo\\'>'
-    >>> _lazy_images("One <img src=\\"one.jpg\\"> and two <img src='two.jpg' > and three <img src=three.jpg> and four <img src=\\"four.png\\" alt=\\"four\\">", placeholder="ph.png")
+    >>> _lazy_images("One <img src=\\"one.jpg\\"> and two <img src='two.jpg' > and three <img src=three.jpg> and four <img src=\\"four.png\\" alt=\\"four\\">", placeholder="ph.png") # doctest: +ALLOW_UNICODE
     'One <img src="ph.png" data-src="one.jpg"> and two <img src="ph.png" data-src=\\'two.jpg\\' > and three <img src="ph.png" data-src=three.jpg> and four <img src="ph.png" data-src="four.png" alt="four">'
-    >>> _lazy_images("No images here")
+    >>> _lazy_images("No images here") # doctest: +ALLOW_UNICODE
     'No images here'
     """
     if placeholder is None:
@@ -585,7 +580,7 @@ def _lazy_images(text, placeholder=None):
             quote = match.group("quote")
             quoted_src = quote + src + quote
             img_tag = img_tag.replace(
-                match.group(0), f'src="{placeholder}" data-src={quoted_src}'
+                match.group(0), 'src="{}" data-src={}'.format(placeholder, quoted_src)
             )
         return img_tag
 
@@ -594,12 +589,17 @@ def _lazy_images(text, placeholder=None):
 
 def _strip_tags(text):
     """
-    >>> _strip_tags("<a href='test.html'>Hello world</a>&lt;img src='foo.jpg'&gt;")
+    >>> _strip_tags("<a href='test.html'>Hello world</a>&lt;img src='foo.jpg'&gt;") # doctest: +ALLOW_UNICODE
     "Hello world&lt;img src='foo.jpg'&gt;"
-    >>> _strip_tags("&#62; &#x3E; Foo")
+    >>> _strip_tags("&#62; &#x3E; Foo") # doctest: +ALLOW_UNICODE
     '&#62; &#x3E; Foo'
     """
-    from html.parser import HTMLParser
+    try:
+        # noinspection PyCompatibility
+        from html.parser import HTMLParser
+    except ImportError:
+        # noinspection PyCompatibility
+        from HTMLParser import HTMLParser
 
     class TagStripper(HTMLParser):
         def __init__(self, **kw):
@@ -610,15 +610,15 @@ def _strip_tags(text):
             self._fed.append(data)
 
         def handle_entityref(self, ref):
-            self._fed.append(f"&{ref};")
+            self._fed.append("&{};".format(ref))
 
         def handle_charref(self, ref):
-            self._fed.append(f"&#{ref};")
+            self._fed.append("&#{};".format(ref))
 
         def get_data(self):
             return "".join(self._fed)
 
-    tag_stripper = TagStripper(convert_charrefs=False)
+    tag_stripper = TagStripper() if PY2 else TagStripper(convert_charrefs=False)
     tag_stripper.feed(text)
     return tag_stripper.get_data()
 
@@ -631,7 +631,7 @@ __plugin_disabling_discouraged__ = gettext(
     "regarding security or other critical issues concerning OctoPrint."
 )
 __plugin_license__ = "AGPLv3"
-__plugin_pythoncompat__ = ">=3.7,<4"
+__plugin_pythoncompat__ = ">=2.7,<4"
 __plugin_implementation__ = AnnouncementPlugin()
 
 __plugin_hooks__ = {

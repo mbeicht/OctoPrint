@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms of the AGPLv3 License"
@@ -52,7 +55,7 @@ def can_perform_update(target, check, online=True):
     )
 
 
-def perform_update(target, check, target_version, log_cb=None, online=True, force=False):
+def perform_update(target, check, target_version, log_cb=None, online=True):
     logger = logging.getLogger("octoprint.plugins.softwareupdate.updaters.update_script")
 
     if not online and not check("offline", False):
@@ -78,7 +81,9 @@ def perform_update(target, check, target_version, log_cb=None, online=True, forc
     ### pre update
 
     if pre_update_script is not None:
-        logger.debug(f"Target: {target}, running pre-update script: {pre_update_script}")
+        logger.debug(
+            "Target: {}, running pre-update script: {}".format(target, pre_update_script)
+        )
         try:
             caller.checked_call(pre_update_script, cwd=folder)
         except CommandlineError as e:
@@ -98,7 +103,9 @@ def perform_update(target, check, target_version, log_cb=None, online=True, forc
             force="true" if force_exact_version else "false",
         )
 
-        logger.debug(f"Target {target}, running update script: {update_command}")
+        logger.debug(
+            "Target {}, running update script: {}".format(target, update_command)
+        )
 
         caller.checked_call(update_command, cwd=folder)
     except CommandlineError as e:

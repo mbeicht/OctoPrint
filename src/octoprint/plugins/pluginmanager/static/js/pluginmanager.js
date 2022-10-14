@@ -58,10 +58,6 @@ $(function () {
             ],
             0
         );
-        self.plugins.currentFilters.subscribe(function () {
-            self.clearPluginsSelection();
-        });
-        self.pluginLookup = {};
 
         self.repositoryplugins = new ItemListHelper(
             "plugin.pluginmanager.repositoryplugins",
@@ -173,8 +169,6 @@ $(function () {
             0
         );
 
-        self.selectedPlugins = ko.observableArray([]);
-
         self.uploadElement = $("#settings_plugin_pluginmanager_repositorydialog_upload");
         self.uploadButton = $(
             "#settings_plugin_pluginmanager_repositorydialog_upload_start"
@@ -210,42 +204,6 @@ $(function () {
 
         self.safeMode = ko.observable();
         self.online = ko.observable();
-        self.supportedArchiveExtensions = ko.observableArray([]);
-        self.supportedPythonExtensions = ko.observableArray([]);
-
-        var createExtensionsHelp = function (extensions) {
-            return _.reduce(
-                extensions,
-                function (result, ext, index) {
-                    return (
-                        result +
-                        '"' +
-                        ext +
-                        '"' +
-                        (index < extensions.length - 2
-                            ? ", "
-                            : index == extensions.length - 2
-                            ? " " + gettext("and") + " "
-                            : "")
-                    );
-                },
-                ""
-            );
-        };
-        self.supportedExtensionsHelp = ko.pureComputed(function () {
-            var archiveExts = createExtensionsHelp(self.supportedArchiveExtensions());
-            var pythonExts = createExtensionsHelp(self.supportedPythonExtensions());
-
-            return _.sprintf(
-                gettext(
-                    "This does not look like a valid plugin. Valid plugins should be " +
-                        "either archives installable via <code>pip</code> that " +
-                        "have the extension %(archiveExtensions)s, or single file python " +
-                        "plugins with the extension %(pythonExtensions)s."
-                ),
-                {archiveExtensions: archiveExts, pythonExtensions: pythonExts}
-            );
-        });
 
         self.requestError = ko.observable(false);
 
@@ -316,21 +274,14 @@ $(function () {
             return !self.printerState.isBusy();
         });
 
-        self.enableBulk = function (data) {
-            return self.enableToggle(data, true) && !data.bundled;
-        };
-
-        self.enableToggle = function (data, ignoreToggling) {
+        self.enableToggle = function (data) {
             var command = self._getToggleCommand(data);
             var not_safemode_victim = !data.safe_mode_victim;
             var not_blacklisted = !data.blacklisted;
             var not_incompatible = !data.incompatible;
-
-            ignoreToggling = !!ignoreToggling;
-
             return (
                 self.enableManagement() &&
-                (ignoreToggling || !self.toggling()) &&
+                !self.toggling() &&
                 (command === "disable" ||
                     (not_safemode_victim && not_blacklisted && not_incompatible)) &&
                 data.key !== "pluginmanager"
@@ -431,9 +382,7 @@ $(function () {
         });
 
         self.invalidFile = ko.pureComputed(function () {
-            var allowedFileExtensions = self
-                .supportedArchiveExtensions()
-                .concat(self.supportedPythonExtensions());
+            var allowedFileExtensions = [".zip", ".tar.gz", ".tgz", ".tar", ".py"];
 
             var name = self.uploadFilename();
             var lowerName = name !== undefined ? name.toLocaleLowerCase() : undefined;
@@ -559,9 +508,7 @@ $(function () {
 
             var installedPlugins = [];
             var noticeCount = 0;
-            var lookup = {};
             _.each(data, function (plugin) {
-                lookup[plugin.key] = plugin;
                 installedPlugins.push(plugin.key);
 
                 if (evalNotices && plugin.notifications && plugin.notifications.length) {
@@ -590,7 +537,6 @@ $(function () {
             if (evalNotices) self.noticeCount(noticeCount);
             self.installedPlugins(installedPlugins);
             self.plugins.updateItems(data);
-            self.pluginLookup = lookup;
         };
 
         self.fromOrphanResponse = function (data) {
@@ -632,12 +578,6 @@ $(function () {
             }
         };
 
-        self.fromSupportedExtensionsResponse = function (data) {
-            if (!data) return;
-            self.supportedArchiveExtensions(data.archive || []);
-            self.supportedPythonExtensions(data.python || []);
-        };
-
         self.dataPluginsDeferred = undefined;
         self.requestPluginData = function (options) {
             if (!_.isPlainObject(options)) {
@@ -676,7 +616,6 @@ $(function () {
                     self.requestError(false);
                     self.fromPluginsResponse(data.plugins, options);
                     self.fromPipResponse(data.pip);
-                    self.fromSupportedExtensionsResponse(data.supported_extensions);
                     self.safeMode(data.safe_mode || false);
                     deferred.resolveWith(data);
                 });
@@ -861,171 +800,6 @@ $(function () {
                     performDisabling();
                 }
             }
-        };
-
-        self._bulkOperation = function (
-            plugins,
-            title,
-            message,
-            successText,
-            failureText,
-            statusText,
-            callback,
-            alreadyCheck
-        ) {
-            var deferred = $.Deferred();
-            var promise = deferred.promise();
-            var options = {
-                title: title,
-                message: _.sprintf(message, {count: plugins.length}),
-                max: plugins.length,
-                output: true
-            };
-            showProgressModal(options, promise);
-
-            var handle = function (key) {
-                var d = $.Deferred();
-
-                var plugin = self.pluginLookup[key];
-                if (!plugin) {
-                    deferred.notify(
-                        _.sprintf(
-                            gettext("Can't resolve plugin with key %(key)s, skipping..."),
-                            {key: key}
-                        ),
-                        false
-                    );
-                    d.reject();
-                    return d.promise();
-                }
-                if (!self.enableBulk(plugin)) {
-                    deferred.notify(
-                        _.sprintf(
-                            gettext(
-                                "Plugin %(plugin)s doesn't support bulk operations, skipping..."
-                            ),
-                            {plugin: plugin.name || key}
-                        ),
-                        false
-                    );
-                    d.reject();
-                    return d.promise();
-                }
-                if (alreadyCheck(plugin)) {
-                    deferred.notify(
-                        _.sprintf(
-                            gettext(
-                                "Plugin %(plugin)s is already %(status)s (or pending), skipping..."
-                            ),
-                            {
-                                plugin: plugin.name || key,
-                                status: statusText
-                            }
-                        ),
-                        true
-                    );
-                    d.reject();
-                    return d.promise();
-                }
-
-                callback(plugin)
-                    .done(function () {
-                        deferred.notify(
-                            _.sprintf(successText, {plugin: plugin.name || key}),
-                            true
-                        );
-                        d.resolve();
-                    })
-                    .fail(function () {
-                        deferred.notify(
-                            _.sprintf(failureText, {plugin: plugin.name || key}),
-                            false
-                        );
-                        d.reject();
-                    });
-                return d.promise();
-            };
-
-            var operations = [];
-            _.each(plugins, function (key) {
-                operations.push(handle(key));
-            });
-            $.when.apply($, _.map(operations, wrapPromiseWithAlways)).done(function () {
-                deferred.resolve();
-                self.requestPluginData();
-            });
-            return promise;
-        };
-
-        self.enableSelectedPlugins = function () {
-            if (self.selectedPlugins().length === 0) return;
-
-            var callback = function (plugin) {
-                return OctoPrint.plugins.pluginmanager.enable(plugin.key);
-            };
-            var check = function (plugin) {
-                return plugin.enabled || plugin.pending_enable;
-            };
-
-            self.toggling(true);
-            self._bulkOperation(
-                self.selectedPlugins(),
-                gettext("Enabling plugins"),
-                gettext("Enabling %(count)i plugins"),
-                gettext("Enabled plugin %(plugin)s..."),
-                gettext("Enabling plugin %(plugin)s failed, continuing..."),
-                gettext("enabled"),
-                callback,
-                check
-            )
-                .done(function () {
-                    self.selectedPlugins([]);
-                })
-                .always(function () {
-                    self.toggling(false);
-                });
-        };
-
-        self.disableSelectedPlugins = function () {
-            if (self.selectedPlugins().length === 0) return;
-
-            var callback = function (plugin) {
-                return OctoPrint.plugins.pluginmanager.disable(plugin.key);
-            };
-            var check = function (plugin) {
-                return !plugin.enabled || plugin.pending_disable;
-            };
-
-            self.toggling(true);
-            self._bulkOperation(
-                self.selectedPlugins(),
-                gettext("Disabling plugins"),
-                gettext("Disabling %(count)i plugins"),
-                gettext("Disabled plugin %(plugin)s..."),
-                gettext("Disabling plugin %(plugin)s failed, continuing..."),
-                gettext("disabled"),
-                callback,
-                check
-            )
-                .done(function () {
-                    self.selectedPlugins([]);
-                })
-                .always(function () {
-                    self.toggling(false);
-                });
-        };
-
-        self.selectAllVisiblePlugins = function () {
-            var selection = [];
-            _.each(self.plugins.paginatedItems(), function (plugin) {
-                if (!self.enableBulk(plugin)) return;
-                selection.push(plugin.key);
-            });
-            self.selectedPlugins(selection);
-        };
-
-        self.clearPluginsSelection = function () {
-            self.selectedPlugins([]);
         };
 
         self.showRepository = function () {
@@ -1959,20 +1733,17 @@ $(function () {
             self.settings = self.settingsViewModel.settings;
         };
 
-        self.onUserPermissionsChanged =
-            self.onUserLoggedIn =
-            self.onUserLoggedOut =
-                function () {
-                    if (
-                        self.loginState.hasPermission(
-                            self.access.permissions.PLUGIN_PLUGINMANAGER_MANAGE
-                        )
-                    ) {
-                        self.requestPluginData({eval_notices: true});
-                    } else {
-                        self._resetNotifications();
-                    }
-                };
+        self.onUserPermissionsChanged = self.onUserLoggedIn = self.onUserLoggedOut = function () {
+            if (
+                self.loginState.hasPermission(
+                    self.access.permissions.PLUGIN_PLUGINMANAGER_MANAGE
+                )
+            ) {
+                self.requestPluginData({eval_notices: true});
+            } else {
+                self._resetNotifications();
+            }
+        };
 
         self.onSettingsShown = function () {
             if (
@@ -1991,10 +1762,7 @@ $(function () {
 
         self._resetNotifications = function () {
             self._closeAllNotifications();
-            self.logContents.action.restart =
-                self.logContents.action.reload =
-                self.logContents.action.reconnect =
-                    false;
+            self.logContents.action.restart = self.logContents.action.reload = self.logContents.action.reconnect = false;
             self.logContents.steps = [];
         };
 
@@ -2057,8 +1825,7 @@ $(function () {
             }
         };
 
-        self._forcedStdoutLine =
-            /You are using pip version .*?, however version .*? is available\.|You should consider upgrading via the '.*?' command\./;
+        self._forcedStdoutLine = /You are using pip version .*?, however version .*? is available\.|You should consider upgrading via the '.*?' command\./;
         self._preprocessLine = function (line) {
             if (line.stream === "stderr" && line.line.match(self._forcedStdoutLine)) {
                 line.stream = "stdout";

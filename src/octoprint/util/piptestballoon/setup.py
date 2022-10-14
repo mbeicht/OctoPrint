@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 """
 This "python package" doesn't actually install. This is intentional. It is merely
 used to figure out some information about the environment a specific pip call
@@ -26,9 +29,9 @@ virtual_env = hasattr(sys, "real_prefix") or (
 writable = os.access(install_dir, os.W_OK)
 
 lines = [
-    f"PIP_INSTALL_DIR={install_dir}",
-    f"PIP_VIRTUAL_ENV={virtual_env}",
-    f"PIP_WRITABLE={writable}",
+    "PIP_INSTALL_DIR={}".format(install_dir),
+    "PIP_VIRTUAL_ENV={}".format(virtual_env),
+    "PIP_WRITABLE={}".format(writable),
 ]
 
 # write to stdout

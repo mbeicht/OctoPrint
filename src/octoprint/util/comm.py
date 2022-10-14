@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __author__ = "Gina Häußge <osd@foosel.net> based on work by David Braam"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2013 David Braam, Gina Häußge & others - Released under terms of the AGPLv3 License"
@@ -11,23 +14,28 @@ import contextlib
 import copy
 import fnmatch
 import glob
-import logging
 import os
-import queue
 import re
 import threading
 import time
+
+try:
+    import queue
+except ImportError:
+    import Queue as queue
+
+import logging
 from collections import deque
 
 import serial
 import wrapt
+from past.builtins import basestring
 
 import octoprint.plugin
 from octoprint.events import Events, eventManager
 from octoprint.filemanager import valid_file_type
 from octoprint.filemanager.destinations import FileDestinations
 from octoprint.settings import settings
-from octoprint.systemcommands import system_command_manager
 from octoprint.util import (
     CountedEvent,
     PrependableQueue,
@@ -35,11 +43,12 @@ from octoprint.util import (
     ResettableTimer,
     TypeAlreadyInQueue,
     TypedQueue,
+    bom_aware_open,
     chunks,
     filter_non_ascii,
     filter_non_utf8,
-    get_bom,
     get_exception_string,
+    monotonic_time,
     sanitize_ascii,
     to_unicode,
 )
@@ -49,7 +58,7 @@ try:
     import winreg
 except ImportError:
     try:
-        import _winreg as winreg  # type: ignore
+        import _winreg as winreg
     except ImportError:
         pass
 
@@ -113,16 +122,15 @@ Groups will be as follows:
 """
 
 regex_temp = re.compile(
-    r"(^|\s)(?P<sensor>B|C|T(?P<toolnum>\d*)|([\w]+)):\s*(?P<actual>%s)(\s*\/?\s*(?P<target>%s))?"
+    r"(?P<tool>B|C|T(?P<toolnum>\d*)):\s*(?P<actual>%s)(\s*\/?\s*(?P<target>%s))?"
     % (regex_float_pattern, regex_float_pattern)
 )
 """Regex matching temperature entries in line.
 
 Groups will be as follows:
 
-  * ``sensor``: whole sensor designator, incl. optional ``toolnum``, e.g. "T1", "B",
-    "C" or anything custom (str)
-  * ``toolnum``: tool number, if provided, only for T0, T1, etc (int)
+  * ``tool``: whole tool designator, incl. optional ``toolnum`` (str)
+  * ``toolnum``: tool number, if provided (int)
   * ``actual``: actual temperature (float)
   * ``target``: target temperature, if provided (float)
 """
@@ -163,7 +171,9 @@ Groups will be as follows:
   * ``es``: multiple E coordinates if present, to be parsed further with regex_e_positions
 """
 
-regex_e_positions = re.compile(rf"E(?P<id>\d+):\s*(?P<value>{regex_float_pattern})")
+regex_e_positions = re.compile(
+    r"E(?P<id>\d+):\s*(?P<value>{float})".format(float=regex_float_pattern)
+)
 """Regex for matching multiple E coordinates in a position report.
 
 Groups will be as follows:
@@ -177,9 +187,6 @@ regex_firmware_splitter = re.compile(r"(^|\s+)([A-Z][A-Z0-9_]*):")
 
 regex_resend_linenumber = re.compile(r"(N|N:)?(?P<n>%s)" % regex_int_pattern)
 """Regex to use for request line numbers in resend requests"""
-
-regex_serial_devices = re.compile(r"^(?:ttyUSB|ttyACM|tty\.usb|cu\.|cuaU|ttyS|rfcomm).*")
-"""Regex used to filter out valid tty devices"""
 
 
 def serialList():
@@ -197,11 +204,15 @@ def serialList():
             pass
 
     else:
-        candidates = []
-        with os.scandir("/dev") as it:
-            for entry in it:
-                if regex_serial_devices.match(entry.name):
-                    candidates.append(entry.path)
+        candidates = (
+            glob.glob("/dev/ttyUSB*")
+            + glob.glob("/dev/ttyACM*")
+            + glob.glob("/dev/tty.usb*")
+            + glob.glob("/dev/cu.*")
+            + glob.glob("/dev/cuaU*")
+            + glob.glob("/dev/ttyS*")
+            + glob.glob("/dev/rfcomm*")
+        )
 
     # additional ports
     additionalPorts = settings().get(["serial", "additionalPorts"])
@@ -250,7 +261,7 @@ def baudrateList(candidates=None):
             candidates.insert(0, int(additional))
         except Exception:
             _logger.warning(
-                f"{additional} is not a valid additional baudrate, ignoring it"
+                "{} is not a valid additional baudrate, ignoring it".format(additional)
             )
 
     # blacklisted baudrates
@@ -297,7 +308,7 @@ gcodeToEvent = {
 }
 
 
-class PositionRecord:
+class PositionRecord(object):
     _standard_attrs = {"x", "y", "z", "e", "f", "t"}
 
     @classmethod
@@ -313,13 +324,13 @@ class PositionRecord:
         return True
 
     def __init__(self, *args, **kwargs):
-        attrs = self._attrs(*kwargs.keys())
+        attrs = self._standard_attrs | {key for key in kwargs if self.valid_e(key)}
         for attr in attrs:
             setattr(self, attr, kwargs.get(attr))
 
     def copy_from(self, other):
         # make sure all standard attrs and attrs from other are set
-        attrs = self._attrs(*dir(other))
+        attrs = self._standard_attrs | {key for key in dir(other) if self.valid_e(key)}
         for attr in attrs:
             setattr(self, attr, getattr(other, attr))
 
@@ -329,19 +340,12 @@ class PositionRecord:
             delattr(self, attr)
 
     def as_dict(self):
-        attrs = self._attrs(*dir(self))
+        attrs = self._standard_attrs | {key for key in dir(self) if self.valid_e(key)}
         return {attr: getattr(self, attr) for attr in attrs}
 
-    def _attrs(self, *args):
-        return self._standard_attrs | {key for key in args if self.valid_e(key)}
 
-    def reset(self):
-        for attr in self._attrs(*dir(self)):
-            setattr(self, attr, None)
-
-
-class TemperatureRecord:
-    RESERVED_IDENTIFIER_REGEX = re.compile(r"B|C|T\d*")
+class TemperatureRecord(object):
+    RESERVED_IDENTIFIER_REGEX = re.compile("[0-9]+|[bc]")
 
     def __init__(self):
         self._tools = {}
@@ -366,8 +370,8 @@ class TemperatureRecord:
         self._chamber = self._to_new_tuple(current, actual, target)
 
     def set_custom(self, identifier, actual=None, target=None):
-        if self.RESERVED_IDENTIFIER_REGEX.fullmatch(identifier):
-            raise ValueError(f"{identifier} is a reserved identifier")
+        if self.RESERVED_IDENTIFIER_REGEX.match(identifier):
+            raise ValueError("{} is a reserved identifier".format(identifier))
         current = self._custom.get(identifier, (None, None))
         self._custom[identifier] = self._to_new_tuple(current, actual, target)
 
@@ -424,7 +428,7 @@ class TemperatureRecord:
             return actual, target
 
 
-class MachineCom:
+class MachineCom(object):
     STATE_NONE = 0
     STATE_OPEN_SERIAL = 1
     STATE_DETECT_SERIAL = 2
@@ -566,7 +570,6 @@ class MachineCom:
         self._sdAlwaysAvailable = settings().getBoolean(["serial", "sdAlwaysAvailable"])
         self._sdRelativePath = settings().getBoolean(["serial", "sdRelativePath"])
         self._sdLowerCase = settings().getBoolean(["serial", "sdLowerCase"])
-        self._sdCancelCommand = settings().get(["serial", "sdCancelCommand"])
         self._blockWhileDwelling = settings().getBoolean(["serial", "blockWhileDwelling"])
         self._send_m112_on_error = settings().getBoolean(["serial", "sendM112OnError"])
         self._disable_sd_printing_detection = settings().getBoolean(
@@ -779,14 +782,6 @@ class MachineCom:
             ["serial", "abortHeatupOnCancel"]
         )
 
-        # serial encoding
-        self._serial_encoding = settings().get(["serial", "encoding"])
-
-        # action commands
-        self._enable_shutdown_action_command = settings().getBoolean(
-            ["serial", "enableShutdownActionCommand"]
-        )
-
         # print job
         self._currentFile = None
         self._job_on_hold = CountedEvent()
@@ -902,7 +897,7 @@ class MachineCom:
 
     def _to_logfile_with_terminal(self, message=None, level=logging.INFO):
         log = "Last lines in terminal:\n" + "\n".join(
-            map(lambda x: f"| {x}", list(self._terminal_log))
+            map(lambda x: "| {}".format(x), list(self._terminal_log))
         )
         if message is not None:
             log = message + "\n| " + log
@@ -975,7 +970,7 @@ class MachineCom:
             return "Offline after error"
         elif state == self.STATE_TRANSFERING_FILE:
             return "Transferring file to SD"
-        return f"Unknown State ({self._state})"
+        return "Unknown State ({})".format(self._state)
 
     def getErrorString(self):
         return self._errorValue
@@ -1054,7 +1049,7 @@ class MachineCom:
             return None
         else:
             return (
-                time.monotonic()
+                monotonic_time()
                 - self._currentFile.getStartTime()
                 - self._pauseWaitTimeLost
             )
@@ -1183,11 +1178,11 @@ class MachineCom:
                 self.sendGcodeScript("beforePrinterDisconnected")
                 if wait:
                     if timeout is not None:
-                        stop = time.monotonic() + timeout
+                        stop = monotonic_time() + timeout
                         while (
                             self._command_queue.unfinished_tasks
                             or self._send_queue.unfinished_tasks
-                        ) and time.monotonic() < stop:
+                        ) and monotonic_time() < stop:
                             time.sleep(0.1)
                     else:
                         self._command_queue.join()
@@ -1320,7 +1315,7 @@ class MachineCom:
                 retval = hook(self, "gcode", scriptName)
             except Exception:
                 self._logger.exception(
-                    f"Error while processing hook {name}.",
+                    "Error while processing hook {name}.".format(**locals()),
                     extra={"plugin": name},
                 )
             else:
@@ -1330,7 +1325,7 @@ class MachineCom:
                     continue
 
                 def to_list(data, t):
-                    if isinstance(data, str):
+                    if isinstance(data, basestring):
                         data = list(s.strip() for s in data.split("\n"))
 
                     if isinstance(data, (list, tuple)):
@@ -1338,7 +1333,7 @@ class MachineCom:
                     else:
                         return None
 
-                additional_tags = {f"plugin:{name}"}
+                additional_tags = {"plugin:{}".format(name)}
                 if len(retval) == 4:
                     additional_tags |= set(retval[3])
 
@@ -1365,7 +1360,7 @@ class MachineCom:
             if (
                 isinstance(line, tuple)
                 and len(line) == 2
-                and isinstance(line[0], str)
+                and isinstance(line[0], basestring)
                 and isinstance(line[1], set)
             ):
                 tags = line[1]
@@ -1389,19 +1384,20 @@ class MachineCom:
         tags_to_use = tags | {
             "trigger:comm.send_gcode_script",
             "source:script",
-            f"script:{scriptName}",
+            "script:{}".format(scriptName),
         }
         for line in scriptLines:
+            # noinspection PyCompatibility
             if (
                 isinstance(line, tuple)
                 and len(line) == 2
-                and isinstance(line[0], str)
+                and isinstance(line[0], basestring)
                 and isinstance(line[1], set)
             ):
                 # 2-tuple: line + tags
                 ttu = tags_to_use | line[1]
                 line = line[0]
-            elif isinstance(line, str):
+            elif isinstance(line, basestring):
                 # just a line
                 ttu = tags_to_use
             else:
@@ -1410,7 +1406,9 @@ class MachineCom:
 
             self.sendCommand(line, part_of_job=part_of_job, tags=ttu)
 
-        return "\n".join(map(lambda x: x if isinstance(x, str) else x[0], scriptLines))
+        return "\n".join(
+            map(lambda x: x if isinstance(x, basestring) else x[0], scriptLines)
+        )
 
     def startPrint(self, pos=None, tags=None, external_sd=False, user=None):
         if not self.isOperational() or self.isPrinting():
@@ -1419,7 +1417,7 @@ class MachineCom:
         if self._currentFile is None:
             raise ValueError("No file selected for printing")
 
-        self._heatupWaitStartTime = None if not self._heating else time.monotonic()
+        self._heatupWaitStartTime = None if not self._heating else monotonic_time()
         self._heatupWaitTimeLost = 0.0
         self._pauseWaitStartTime = 0
         self._pauseWaitTimeLost = 0.0
@@ -1430,9 +1428,11 @@ class MachineCom:
         if "source:plugin" in tags:
             for tag in tags:
                 if tag.startswith("plugin:"):
-                    self._logger.info(f"Starting job on behalf of plugin {tag[7:]}")
+                    self._logger.info(
+                        "Starting job on behalf of plugin {}".format(tag[7:])
+                    )
         elif "source:api" in tags:
-            self._logger.info(f"Starting job on behalf of user {user}")
+            self._logger.info("Starting job on behalf of user {}".format(user))
 
         try:
             with self._jobLock:
@@ -1466,7 +1466,7 @@ class MachineCom:
                         if pos is not None and isinstance(pos, int) and pos > 0:
                             self._currentFile.pos = pos
                             self.sendCommand(
-                                f"M26 S{pos}",
+                                "M26 S{}".format(pos),
                                 part_of_job=True,
                                 tags=tags
                                 | {
@@ -1629,7 +1629,6 @@ class MachineCom:
                 timeout
             )
         )
-        self._record_cancel_data = False
         self._cancel_preparation_done()
 
     def _cancel_preparation_done(self, check_timer=True, user=None):
@@ -1683,16 +1682,14 @@ class MachineCom:
             # we aren't even printing, nothing to cancel...
             return
 
-        if self.isCancelling():
-            # we are already cancelling
-            return
-
         if "source:plugin" in tags:
             for tag in tags:
                 if tag.startswith("plugin:"):
-                    self._logger.info(f"Cancelling job on behalf of plugin {tag[7:]}")
+                    self._logger.info(
+                        "Cancelling job on behalf of plugin {}".format(tag[7:])
+                    )
         elif "source:api" in tags:
-            self._logger.info(f"Cancelling job on behalf of user {user}")
+            self._logger.info("Cancelling job on behalf of user {}".format(user))
 
         if self.isStreaming():
             # we are streaming, we handle cancelling that differently...
@@ -1716,7 +1713,6 @@ class MachineCom:
                 # we don't call on_print_job_cancelled on our callback here
                 # because we do this only after our M114 has been answered
                 # by the firmware
-                self.cancel_position.reset()
                 self._record_cancel_data = True
 
                 with self._cancel_mutex:
@@ -1747,7 +1743,7 @@ class MachineCom:
             if self.isSdFileSelected():
                 if not external_sd:
                     self.sendCommand(
-                        self._sdCancelCommand,
+                        "M25",
                         part_of_job=True,
                         tags=tags | cancel_tags,
                     )  # pause print
@@ -1790,7 +1786,6 @@ class MachineCom:
                 timeout
             )
         )
-        self._record_pause_data = False
         self._pause_preparation_done()
 
     def _pause_preparation_done(self, check_timer=True, suppress_script=False, user=None):
@@ -1841,10 +1836,10 @@ class MachineCom:
             for tag in tags:
                 if tag.startswith("plugin:"):
                     self._logger.info(
-                        f"Pausing/resuming job on behalf of plugin {tag[7:]}"
+                        "Pausing/resuming job on behalf of plugin {}".format(tag[7:])
                     )
         elif user:
-            self._logger.info(f"Pausing/resuming job on behalf of user {user}")
+            self._logger.info("Pausing/resuming job on behalf of user {}".format(user))
 
         valid_paused_states = (self.STATE_PAUSED, self.STATE_PAUSING)
         valid_running_states = (
@@ -1861,7 +1856,7 @@ class MachineCom:
             if not pause and self._state in valid_paused_states:
                 if self._pauseWaitStartTime:
                     self._pauseWaitTimeLost = self._pauseWaitTimeLost + (
-                        time.monotonic() - self._pauseWaitStartTime
+                        monotonic_time() - self._pauseWaitStartTime
                     )
                     self._pauseWaitStartTime = None
 
@@ -1894,7 +1889,7 @@ class MachineCom:
 
             elif pause and self._state in valid_running_states:
                 if not self._pauseWaitStartTime:
-                    self._pauseWaitStartTime = time.monotonic()
+                    self._pauseWaitStartTime = monotonic_time()
 
                 self._changeState(self.STATE_PAUSING)
                 if self.isSdFileSelected() and local_handling:
@@ -1912,7 +1907,6 @@ class MachineCom:
                     # we don't call on_print_job_paused on our callback here
                     # because we do this only after our M114 has been answered
                     # by the firmware
-                    self.pause_position.reset()
                     self._record_pause_data = True
 
                     with self._pause_mutex:
@@ -2071,7 +2065,7 @@ class MachineCom:
             tags = set()
 
         self.sendCommand(
-            f"M110 N{number}",
+            "M110 N{}".format(number),
             part_of_job=part_of_job,
             tags=tags
             | {
@@ -2103,7 +2097,7 @@ class MachineCom:
 
     def _processTemperatures(self, line):
         current_tool = self._currentTool if self._currentTool is not None else 0
-        current_tool_key = f"T{current_tool}"
+        current_tool_key = "T%d" % current_tool
         maxToolNum, parsedTemps = parse_temperature_line(line, current_tool)
 
         maxToolNum = max(
@@ -2118,7 +2112,7 @@ class MachineCom:
                     return
             except Exception:
                 self._logger.exception(
-                    f"Error while processing temperatures in {name}, skipping",
+                    "Error while processing temperatures in {}, skipping".format(name),
                     extra={"plugin": name},
                 )
 
@@ -2159,15 +2153,10 @@ class MachineCom:
             del parsedTemps["C"]
             self.last_temperature.set_chamber(actual=actual, target=target)
 
-        # all other injected temperatures or temperature-like entries
-        for key, data in parsedTemps.items():
-            try:
-                actual, target = data
-                self.last_temperature.set_custom(key, actual=actual, target=target)
-            except Exception as ex:
-                self._logger.warning(
-                    f"Could not add custom temperature record {key}: {ex}"
-                )
+        # all other injected temperatures
+        for key in parsedTemps.keys():
+            actual, target = parsedTemps[key]
+            self.last_temperature.set_custom(key, actual=actual, target=target)
 
     ##~~ Serial monitor processing received messages
 
@@ -2228,7 +2217,7 @@ class MachineCom:
                 if line is None:
                     break
 
-                now = time.monotonic()
+                now = monotonic_time()
 
                 if line.strip() != "":
                     self._consecutive_timeouts = 0
@@ -2301,32 +2290,25 @@ class MachineCom:
 
                         if action_name == "start":
                             if self._currentFile is not None:
-                                self._dual_log(
-                                    "(Re)Starting current job on request of the printer...",
-                                    level=logging.INFO,
+                                self._log(
+                                    "(Re)Starting current job on request of the printer..."
                                 )
                                 self.startPrint(
                                     tags={"trigger:serial.action_command.start"}
                                 )
                         elif action_name == "cancel":
-                            self._dual_log(
-                                "Cancelling on request of the printer...",
-                                level=logging.INFO,
-                            )
+                            self._log("Cancelling on request of the printer...")
                             self.cancelPrint(
                                 tags={"trigger:serial.action_command.cancel"}
                             )
                         elif action_name == "pause":
-                            self._dual_log(
-                                "Pausing on request of the printer...", level=logging.INFO
-                            )
+                            self._log("Pausing on request of the printer...")
                             self.setPause(
                                 True, tags={"trigger:serial.action_command.pause"}
                             )
                         elif action_name == "paused":
-                            self._dual_log(
-                                "Printer signalled that it paused, switching state...",
-                                level=logging.INFO,
+                            self._log(
+                                "Printer signalled that it paused, switching state..."
                             )
                             self.setPause(
                                 True,
@@ -2334,17 +2316,13 @@ class MachineCom:
                                 tags={"trigger:serial.action_command.paused"},
                             )
                         elif action_name == "resume":
-                            self._dual_log(
-                                "Resuming on request of the printer...",
-                                level=logging.INFO,
-                            )
+                            self._log("Resuming on request of the printer...")
                             self.setPause(
                                 False, tags={"trigger:serial.action_command.resume"}
                             )
                         elif action_name == "resumed":
-                            self._dual_log(
-                                "Printer signalled that it resumed, switching state...",
-                                level=logging.INFO,
+                            self._log(
+                                "Printer signalled that it resumed, switching state..."
                             )
                             self.setPause(
                                 False,
@@ -2352,45 +2330,20 @@ class MachineCom:
                                 tags={"trigger:serial.action_command.resumed"},
                             )
                         elif action_name == "disconnect":
-                            self._dual_log(
-                                "Disconnecting on request of the printer...",
-                                level=logging.INFO,
-                            )
+                            self._log("Disconnecting on request of the printer...")
                             self._callback.on_comm_force_disconnect()
-                        elif action_name == "shutdown":
-                            if self._enable_shutdown_action_command:
-                                self._dual_log(
-                                    "Shutting down system on request of printer...",
-                                    level=logging.WARNING,
-                                )
-                                try:
-                                    system_command_manager().perform_system_shutdown()
-                                except Exception as ex:
-                                    self._log(f"Error executing system shutdown: {ex}")
-                            else:
-                                self._dual_log(
-                                    "Received a shutdown command from the printer, but processing of this command is disabled",
-                                    level=logging.WARNING,
-                                )
                         elif self._sdEnabled and action_name == "sd_inserted":
-                            self._dual_log(
-                                "Printer reported SD card as inserted", level=logging.INFO
-                            )
+                            self._log("Printer reported SD card as inserted")
                             self._sdAvailable = True
                             self.refreshSdFiles()
                             self._callback.on_comm_sd_state_change(self._sdAvailable)
                         elif self._sdEnabled and action_name == "sd_ejected":
-                            self._dual_log(
-                                "Printer reported SD card as ejected", level=logging.INFO
-                            )
+                            self._log("Printer reported SD card as ejected")
                             self._sdAvailable = False
                             self._sdFiles = []
                             self._callback.on_comm_sd_state_change(self._sdAvailable)
                         elif self._sdEnabled and action_name == "sd_updated":
-                            self._dual_log(
-                                "Printer reported a change on the SD card",
-                                level=logging.INFO,
-                            )
+                            self._log("Printer reported a change on the SD card")
                             self.refreshSdFiles()
                         else:
                             for name, hook in self._printer_action_hooks.items():
@@ -2587,7 +2540,7 @@ class MachineCom:
                         else:
                             # multiple extruder coordinates provided, find current one
                             self.last_position.e = (
-                                parsed.get(f"e{self._currentTool}")
+                                parsed.get("e{}".format(self._currentTool))
                                 if not self.isSdFileSelected()
                                 else None
                             )
@@ -2642,7 +2595,7 @@ class MachineCom:
                     ):
                         self._logger.info("Externally triggered heatup detected")
                         self._heating = True
-                        self._heatupWaitStartTime = time.monotonic()
+                        self._heatupWaitStartTime = monotonic_time()
 
                     self._processTemperatures(line)
                     self._callback.on_comm_temperature_update(
@@ -2684,58 +2637,6 @@ class MachineCom:
                         except ValueError:
                             pass
 
-                ##~~ Firmware capability report triggered by M115
-                elif lower_line.startswith("cap:"):
-                    parsed = parse_capability_line(lower_line)
-                    if parsed is not None:
-                        capability, enabled = parsed
-                        self._firmware_capabilities[capability] = enabled
-
-                        if self._capability_support.get(capability, False):
-                            if capability == self.CAPABILITY_AUTOREPORT_TEMP and enabled:
-                                self._logger.info(
-                                    "Firmware states that it supports temperature autoreporting"
-                                )
-                                self._set_autoreport_temperature_interval()
-                            elif (
-                                capability == self.CAPABILITY_AUTOREPORT_SD_STATUS
-                                and enabled
-                            ):
-                                self._logger.info(
-                                    "Firmware states that it supports sd status autoreporting"
-                                )
-                                self._set_autoreport_sdstatus_interval()
-                            elif capability == self.CAPABILITY_AUTOREPORT_POS and enabled:
-                                self._logger.info(
-                                    "Firmware states that it supports position autoreporting"
-                                )
-                                self._set_autoreport_pos_interval()
-                            elif (
-                                capability == self.CAPABILITY_EMERGENCY_PARSER and enabled
-                            ):
-                                self._logger.info(
-                                    "Firmware states that it supports emergency GCODEs to be sent without waiting for an acknowledgement first"
-                                )
-
-                        # notify plugins
-                        for name, hook in self._firmware_info_hooks[
-                            "capabilities"
-                        ].items():
-                            try:
-                                hook(
-                                    self,
-                                    capability,
-                                    enabled,
-                                    copy.copy(self._firmware_capabilities),
-                                )
-                            except Exception:
-                                self._logger.exception(
-                                    "Error processing firmware capability hook {}:".format(
-                                        name
-                                    ),
-                                    extra={"plugin": name},
-                                )
-
                 ##~~ firmware name & version
                 elif "NAME:" in line or line.startswith("NAME."):
                     # looks like a response to M115
@@ -2767,7 +2668,7 @@ class MachineCom:
                     if not self._firmware_info_received and firmware_name:
                         firmware_name = firmware_name.strip()
                         self._logger.info(
-                            f'Printer reports firmware name "{firmware_name}"'
+                            'Printer reports firmware name "{}"'.format(firmware_name)
                         )
 
                         if self._firmware_detection:
@@ -2835,8 +2736,6 @@ class MachineCom:
                                 )
 
                                 self._sdLowerCase = True
-                                self._sendChecksumWithUnknownCommands = True
-                                self._unknownCommandsNeedAck = True
 
                         self._firmware_info_received = True
                         self._firmware_info = data
@@ -2857,6 +2756,58 @@ class MachineCom:
                         self._callback.on_comm_firmware_info(
                             firmware_name, copy.copy(data)
                         )
+
+                ##~~ Firmware capability report triggered by M115
+                elif lower_line.startswith("cap:"):
+                    parsed = parse_capability_line(lower_line)
+                    if parsed is not None:
+                        capability, enabled = parsed
+                        self._firmware_capabilities[capability] = enabled
+
+                        if self._capability_support.get(capability, False):
+                            if capability == self.CAPABILITY_AUTOREPORT_TEMP and enabled:
+                                self._logger.info(
+                                    "Firmware states that it supports temperature autoreporting"
+                                )
+                                self._set_autoreport_temperature_interval()
+                            elif (
+                                capability == self.CAPABILITY_AUTOREPORT_SD_STATUS
+                                and enabled
+                            ):
+                                self._logger.info(
+                                    "Firmware states that it supports sd status autoreporting"
+                                )
+                                self._set_autoreport_sdstatus_interval()
+                            elif capability == self.CAPABILITY_AUTOREPORT_POS and enabled:
+                                self._logger.info(
+                                    "Firmware states that it supports position autoreporting"
+                                )
+                                self._set_autoreport_pos_interval()
+                            elif (
+                                capability == self.CAPABILITY_EMERGENCY_PARSER and enabled
+                            ):
+                                self._logger.info(
+                                    "Firmware states that it supports emergency GCODEs to be sent without waiting for an acknowledgement first"
+                                )
+
+                        # notify plugins
+                        for name, hook in self._firmware_info_hooks[
+                            "capabilities"
+                        ].items():
+                            try:
+                                hook(
+                                    self,
+                                    capability,
+                                    enabled,
+                                    copy.copy(self._firmware_capabilities),
+                                )
+                            except Exception:
+                                self._logger.exception(
+                                    "Error processing firmware capability hook {}:".format(
+                                        name
+                                    ),
+                                    extra={"plugin": name},
+                                )
 
                 ##~~ invalid extruder
                 elif "invalid extruder" in lower_line:
@@ -2894,7 +2845,7 @@ class MachineCom:
                             # we actually do send a T command here instead of just settings self._currentTool just in case
                             # we had any scripts or plugins modify stuff due to the prior tool change
                             self.sendCommand(
-                                f"T{fallback_tool}",
+                                "T{}".format(fallback_tool),
                                 tags={
                                     "trigger:revert_invalid_tool",
                                 },
@@ -3089,7 +3040,7 @@ class MachineCom:
 
                 ### Serial detection
                 if self._state == self.STATE_DETECT_SERIAL:
-                    if line == "" or time.monotonic() > self._ok_timeout:
+                    if line == "" or monotonic_time() > self._ok_timeout:
                         self._perform_detection_step()
                     elif "start" in line or line.startswith("ok"):
                         self._onConnected()
@@ -3106,7 +3057,7 @@ class MachineCom:
                             # if it was a wait we probably missed an ok, so let's simulate that now
                             self._handle_ok()
                         self._onConnected()
-                    elif time.monotonic() > self._timeout:
+                    elif monotonic_time() > self._timeout:
                         if try_hello and self._hello_sent < 3:
                             self._log(
                                 "No answer from the printer within the connection timeout, trying another hello"
@@ -3218,7 +3169,9 @@ class MachineCom:
 
         # now increment the timeout counter
         self._consecutive_timeouts += 1
-        self._logger.debug(f"Now at {self._consecutive_timeouts} consecutive timeouts")
+        self._logger.debug(
+            "Now at {} consecutive timeouts".format(self._consecutive_timeouts)
+        )
 
         if 0 < consecutive_max < self._consecutive_timeouts:
             # too many consecutive timeouts, we give up
@@ -3275,7 +3228,7 @@ class MachineCom:
     def _perform_detection_step(self, init=False):
         def log(message):
             self._log(message)
-            self._logger.info(f"Serial detection: {message}")
+            self._logger.info("Serial detection: {}".format(message))
 
         if init:
             port = self._port
@@ -3306,7 +3259,7 @@ class MachineCom:
                     len(self._detection_candidates),
                     ", ".join(
                         map(
-                            lambda x: f"{x[0]}@{x[1]}",
+                            lambda x: "{}@{}".format(x[0], x[1]),
                             self._detection_candidates,
                         )
                     ),
@@ -3325,7 +3278,7 @@ class MachineCom:
             try:
                 if self._serial.timeout != timeout:
                     self._serial.timeout = timeout
-                self._timeout = self._ok_timeout = time.monotonic() + timeout
+                self._timeout = self._ok_timeout = monotonic_time() + timeout
             except Exception:
                 self._log(
                     "Unexpected error while setting timeout {}: {}".format(
@@ -3333,7 +3286,7 @@ class MachineCom:
                     )
                 )
                 self._logger.exception(
-                    f"Unexpected error while setting timeout {timeout}"
+                    "Unexpected error while setting timeout {}".format(timeout)
                 )
             else:
                 self._do_send_without_checksum(b"", log=False)  # new line to reset things
@@ -3362,7 +3315,7 @@ class MachineCom:
                 (p, b) = self._detection_candidates.pop(0)
 
                 try:
-                    log(f"Trying port {p}, baudrate {b}")
+                    log("Trying port {}, baudrate {}".format(p, b))
                     if self._serial is None or self._serial.port != p:
                         if not self._open_serial(p, b, trigger_errors=False):
                             log(
@@ -3385,7 +3338,9 @@ class MachineCom:
                             b, get_exception_string()
                         )
                     )
-                    self._logger.exception(f"Unexpected error while setting baudrate {b}")
+                    self._logger.exception(
+                        "Unexpected error while setting baudrate {}".format(b)
+                    )
 
         error_text = "No more candidates to test, and no working port/baudrate combination detected."
         self._trigger_error(error_text, "autodetect")
@@ -3394,7 +3349,7 @@ class MachineCom:
         if self._heating:
             if self._heatupWaitStartTime:
                 self._heatupWaitTimeLost = self._heatupWaitTimeLost + (
-                    time.monotonic() - self._heatupWaitStartTime
+                    monotonic_time() - self._heatupWaitStartTime
                 )
                 self._heatupWaitStartTime = None
             self._heating = False
@@ -3545,7 +3500,7 @@ class MachineCom:
             except Exception:
                 interval = 2
         self.sendCommand(
-            f"M155 S{interval}",
+            "M155 S{}".format(interval),
             tags={"trigger:comm.set_autoreport_temperature_interval"},
         )
 
@@ -3556,7 +3511,7 @@ class MachineCom:
             except Exception:
                 interval = 1
         self.sendCommand(
-            f"M27 S{interval}",
+            "M27 S{}".format(interval),
             tags={"trigger:comm.set_autoreport_sdstatus_interval"},
         )
 
@@ -3569,7 +3524,7 @@ class MachineCom:
             except Exception:
                 interval = 5
         self.sendCommand(
-            f"M154 S{interval}",
+            "M154 S{}".format(interval),
             part_of_job=part_of_job,
             tags=tags | {"trigger:comm.set_autoreport_pos_interval"},
         )
@@ -3583,7 +3538,7 @@ class MachineCom:
             except Exception:
                 interval = 2
         self.sendCommand(
-            f"M113 S{interval}",
+            "M113 S{}".format(interval),
             tags={"trigger:comm.set_busy_protocol_interval"},
             on_sent=callback,
         )
@@ -3716,7 +3671,7 @@ class MachineCom:
         return max(comm_timeout, temperature_timeout + 1)
 
     def _get_new_communication_timeout(self):
-        return time.monotonic() + self._get_communication_timeout_interval()
+        return monotonic_time() + self._get_communication_timeout_interval()
 
     def _send_from_command_queue(self):
         # We loop here to make sure that if we do NOT send the first command
@@ -3757,7 +3712,7 @@ class MachineCom:
         def default(_, p, b, timeout):
             # connect to regular serial port
             self._dual_log(
-                f"Connecting to port {port}, baudrate {baudrate}",
+                "Connecting to port {}, baudrate {}".format(port, baudrate),
                 level=logging.INFO,
             )
 
@@ -3770,30 +3725,23 @@ class MachineCom:
             if settings().getBoolean(["serial", "exclusive"]):
                 serial_port_args["exclusive"] = True
 
-            try:
-                serial_obj = serial.Serial(**serial_port_args)
-                serial_obj.port = str(p)
+            serial_obj = serial.Serial(**serial_port_args)
+            serial_obj.port = str(p)
 
-                use_parity_workaround = settings().get(["serial", "useParityWorkaround"])
-                needs_parity_workaround = get_os() == "linux" and os.path.exists(
-                    "/etc/debian_version"
-                )  # See #673
+            use_parity_workaround = settings().get(["serial", "useParityWorkaround"])
+            needs_parity_workaround = get_os() == "linux" and os.path.exists(
+                "/etc/debian_version"
+            )  # See #673
 
-                if use_parity_workaround == "always" or (
-                    needs_parity_workaround and use_parity_workaround == "detect"
-                ):
-                    serial_obj.parity = serial.PARITY_ODD
-                    serial_obj.open()
-                    serial_obj.close()
-                    serial_obj.parity = serial.PARITY_NONE
-
+            if use_parity_workaround == "always" or (
+                needs_parity_workaround and use_parity_workaround == "detect"
+            ):
+                serial_obj.parity = serial.PARITY_ODD
                 serial_obj.open()
+                serial_obj.close()
+                serial_obj.parity = serial.PARITY_NONE
 
-            except serial.SerialException:
-                self._logger.info(
-                    f"Failed to connect: Port {p} is busy or does not exist"
-                )
-                return None
+            serial_obj.open()
 
             # Set close_exec flag on serial handle, see #3212
             if hasattr(serial_obj, "fd"):
@@ -3934,7 +3882,7 @@ class MachineCom:
                         ret = hook(self, stripped_error)
                     except Exception:
                         self._logger.exception(
-                            f"Error while processing hook {name}:",
+                            "Error while processing hook {name}:".format(**locals()),
                             extra={"plugin": name},
                         )
                     else:
@@ -4015,10 +3963,10 @@ class MachineCom:
 
         if ret != "":
             try:
-                self._log(f"Recv: {sanitize_ascii(ret)}")
+                self._log("Recv: {}".format(sanitize_ascii(ret)))
             except ValueError as e:
-                self._log(f"WARN: While reading last line: {e}")
-                self._log(f"Recv: {ret!r}")
+                self._log("WARN: While reading last line: {}".format(e))
+                self._log("Recv: {!r}".format(ret))
 
             if null_pos >= 0:
                 self._logger.warning("Received line:")
@@ -4035,7 +3983,7 @@ class MachineCom:
                 ret = hook(self, ret)
             except Exception:
                 self._logger.exception(
-                    f"Error while processing hook {name}:",
+                    "Error while processing hook {name}:".format(**locals()),
                     extra={"plugin": name},
                 )
             else:
@@ -4050,7 +3998,7 @@ class MachineCom:
 
         try:
             line, pos, lineno = self._currentFile.getNext()
-        except OSError:
+        except EnvironmentError:
             self._log(
                 "There was an error reading from the file that's being printed, cancelling the print. Please "
                 "consult octoprint.log for details on the error."
@@ -4101,8 +4049,8 @@ class MachineCom:
                     line,
                     tags={
                         "source:file",
-                        f"filepos:{pos}",
-                        f"fileline:{lineno}",
+                        "filepos:{}".format(pos),
+                        "fileline:{}".format(lineno),
                     },
                 )
                 self._callback.on_comm_progress()
@@ -4210,7 +4158,7 @@ class MachineCom:
             #
             # this it to prevent the log from getting flooded for extremely bad communication issues
             if self._log_resends:
-                now = time.monotonic()
+                now = monotonic_time()
                 new_rate_window = (
                     self._log_resends_rate_start is None
                     or self._log_resends_rate_start + self._log_resends_rate_frame < now
@@ -4279,7 +4227,7 @@ class MachineCom:
                 # handled it.
                 return False
 
-            cmd = self._lastLines[-self._resendDelta].decode(self._serial_encoding)
+            cmd = self._lastLines[-self._resendDelta].decode("ascii")
             result = self._enqueue_for_sending(cmd, linenumber=lineNumber, resend=True)
 
             self._resendDelta -= 1
@@ -4490,7 +4438,7 @@ class MachineCom:
                         break
 
                     # sleep if we are dwelling
-                    now = time.monotonic()
+                    now = monotonic_time()
                     if (
                         self._blockWhileDwelling
                         and self._dwelling_until
@@ -4516,9 +4464,7 @@ class MachineCom:
                         # line number predetermined - this only happens for resends, so we'll use the number and
                         # send directly without any processing (since that already took place on the first sending!)
                         self._use_up_clear(gcode)
-                        self._do_send_with_checksum(
-                            command.encode(self._serial_encoding), linenumber
-                        )
+                        self._do_send_with_checksum(command.encode("ascii"), linenumber)
 
                     else:
                         if not processed:
@@ -4609,7 +4555,7 @@ class MachineCom:
     def _log_command_phase(self, phase, command, *args, **kwargs):
         if self._phaseLogger.isEnabledFor(logging.DEBUG):
             output_parts = [
-                f"phase: {phase}",
+                "phase: {}".format(phase),
                 "command: {}".format(to_unicode(command, errors="replace")),
             ]
 
@@ -4652,9 +4598,9 @@ class MachineCom:
 
         # send it through the phase specific handlers provided by plugins
         for name, hook in self._gcode_hooks[phase].items():
-            try:
-                new_results = []
-                for command, command_type, gcode, subcode, tags in results:
+            new_results = []
+            for command, command_type, gcode, subcode, tags in results:
+                try:
                     hook_results = hook(
                         self,
                         phase,
@@ -4664,7 +4610,17 @@ class MachineCom:
                         subcode=subcode,
                         tags=tags,
                     )
-
+                except Exception:
+                    self._logger.exception(
+                        "Error while processing hook {name} for phase "
+                        "{phase} and command {command}:".format(
+                            name=name,
+                            phase=phase,
+                            command=to_unicode(command, errors="replace"),
+                        ),
+                        extra={"plugin": name},
+                    )
+                else:
                     normalized = _normalize_command_handler_result(
                         command,
                         command_type,
@@ -4674,8 +4630,8 @@ class MachineCom:
                         hook_results,
                         tags_to_add={
                             "source:rewrite",
-                            f"phase:{phase}",
-                            f"plugin:{name}",
+                            "phase:{}".format(phase),
+                            "plugin:{}".format(name),
                         },
                     )
 
@@ -4696,23 +4652,10 @@ class MachineCom:
                         new_results.append((command, command_type, gcode, subcode, tags))
                     else:
                         new_results += normalized
-
-            except Exception:
-                self._logger.exception(
-                    "Error while processing hook {name} for phase "
-                    "{phase}:".format(
-                        name=name,
-                        phase=phase,
-                    ),
-                    extra={"plugin": name},
-                )
-
-            else:
-                if not new_results:
-                    # hook handler returned None or empty list for all commands, so
-                    # we'll stop here and return a full out empty result
-                    return []
-                results = new_results
+            if not new_results:
+                # hook handler returned None or empty list for all commands, so we'll stop here and return a full out empty result
+                return []
+            results = new_results
 
         # if it's a gcode command send it through the specific handler if it exists
         new_results = []
@@ -4791,7 +4734,7 @@ class MachineCom:
                 )
 
         # trigger built-in handler if available
-        handler = getattr(self, f"_atcommand_{atcommand}_{phase}", None)
+        handler = getattr(self, "_atcommand_{}_{}".format(atcommand, phase), None)
         if callable(handler):
             try:
                 handler(atcommand, parameters, tags=tags)
@@ -4825,7 +4768,7 @@ class MachineCom:
         )
 
     def _do_send(self, command, gcode=None):
-        command_to_send = command.encode(self._serial_encoding, errors="replace")
+        command_to_send = command.encode("ascii", errors="replace")
         if self._needs_checksum(gcode):
             self._do_increment_and_send_with_checksum(command_to_send)
         else:
@@ -4839,15 +4782,11 @@ class MachineCom:
             self._do_send_with_checksum(cmd, linenumber)
 
     def _do_send_with_checksum(self, command, linenumber):
-        command_to_send = (
-            b"N" + str(linenumber).encode(self._serial_encoding) + b" " + command
-        )
+        command_to_send = b"N" + str(linenumber).encode("ascii") + b" " + command
         checksum = 0
         for c in bytearray(command_to_send):
             checksum ^= c
-        command_to_send = (
-            command_to_send + b"*" + str(checksum).encode(self._serial_encoding)
-        )
+        command_to_send = command_to_send + b"*" + str(checksum).encode("ascii")
         self._do_send_without_checksum(command_to_send)
 
     def _do_send_without_checksum(self, cmd, log=True):
@@ -4855,7 +4794,7 @@ class MachineCom:
             return
 
         if log:
-            self._log("Send: " + cmd.decode(self._serial_encoding))
+            self._log("Send: " + cmd.decode("ascii"))
 
         cmd += b"\n"
         written = 0
@@ -4976,9 +4915,10 @@ class MachineCom:
             def convert(data):
                 result = []
                 for d in data:
+                    # noinspection PyCompatibility
                     if isinstance(d, tuple) and len(d) == 2:
                         result.append((d[0], None, d[1]))
-                    elif isinstance(d, str):
+                    elif isinstance(d, basestring):
                         result.append(d)
                 return result
 
@@ -5128,7 +5068,7 @@ class MachineCom:
         wait=False,
         support_r=False,
         *args,
-        **kwargs,
+        **kwargs
     ):
         toolNum = self._currentTool
         toolMatch = regexes_parameters["intT"].search(cmd)
@@ -5166,7 +5106,7 @@ class MachineCom:
         wait=False,
         support_r=False,
         *args,
-        **kwargs,
+        **kwargs
     ):
         match = regexes_parameters["floatS"].search(cmd)
         if not match and support_r:
@@ -5194,7 +5134,7 @@ class MachineCom:
         wait=False,
         support_r=False,
         *args,
-        **kwargs,
+        **kwargs
     ):
         match = regexes_parameters["floatS"].search(cmd)
         if not match and support_r:
@@ -5216,7 +5156,7 @@ class MachineCom:
     def _gcode_M109_sent(
         self, cmd, cmd_type=None, gcode=None, subcode=None, *args, **kwargs
     ):
-        self._heatupWaitStartTime = time.monotonic()
+        self._heatupWaitStartTime = monotonic_time()
         self._long_running_command = True
         self._heating = True
         self._gcode_M104_sent(cmd, cmd_type, wait=True, support_r=True)
@@ -5224,7 +5164,7 @@ class MachineCom:
     def _gcode_M190_sent(
         self, cmd, cmd_type=None, gcode=None, subcode=None, *args, **kwargs
     ):
-        self._heatupWaitStartTime = time.monotonic()
+        self._heatupWaitStartTime = monotonic_time()
         self._long_running_command = True
         self._heating = True
         self._gcode_M140_sent(cmd, cmd_type, wait=True, support_r=True)
@@ -5232,7 +5172,7 @@ class MachineCom:
     def _gcode_M191_sent(
         self, cmd, cmd_type=None, gcode=None, subcode=None, *args, **kwargs
     ):
-        self._heatupWaitStartTime = time.monotonic()
+        self._heatupWaitStartTime = monotonic_time()
         self._long_running_command = True
         self._heating = True
         self._gcode_M141_sent(cmd, cmd_type, wait=True, support_r=True)
@@ -5240,7 +5180,7 @@ class MachineCom:
     def _gcode_M116_sent(
         self, cmd, cmd_type=None, gcode=None, subcode=None, *args, **kwargs
     ):
-        self._heatupWaitStartTime = time.monotonic()
+        self._heatupWaitStartTime = monotonic_time()
         self._long_running_command = True
         self._heating = True
 
@@ -5294,7 +5234,7 @@ class MachineCom:
 
         with self._line_mutex:
             self._logger.info(
-                f"M110 detected, setting current line number to {newLineNumber}"
+                "M110 detected, setting current line number to {}".format(newLineNumber)
             )
 
             # send M110 command with new line number
@@ -5323,7 +5263,7 @@ class MachineCom:
             self._printerProfileManager.get_current_or_default()["extruder"]["count"]
         ):
             self._do_increment_and_send_with_checksum(
-                f"M104 T{tool} S0".encode(self._serial_encoding)
+                "M104 T{tool} S0".format(tool=tool).encode("ascii")
             )
         if self._printerProfileManager.get_current_or_default()["heatedBed"]:
             self._do_increment_and_send_with_checksum(b"M140 S0")
@@ -5364,7 +5304,7 @@ class MachineCom:
             _timeout = float(s_match.group("value"))
 
         self._timeout = self._get_new_communication_timeout() + _timeout
-        self._dwelling_until = time.monotonic() + _timeout
+        self._dwelling_until = monotonic_time() + _timeout
 
     def _emergency_force_send(self, cmd, message, gcode=None, *args, **kwargs):
         # only jump the queue with our command if the EMERGENCY_PARSER capability is available
@@ -5429,10 +5369,10 @@ class MachineCom:
             if gcode in self._emergency_commands and gcode != "M112":
                 return self._emergency_force_send(
                     cmd,
-                    f"Force-sending {gcode} to the printer",
+                    "Force-sending {} to the printer".format(gcode),
                     gcode=gcode,
                     *args,
-                    **kwargs,
+                    **kwargs
                 )
 
             if (
@@ -5441,7 +5381,7 @@ class MachineCom:
                 and "trigger:cancel" not in tags
                 and "trigger:pause" not in tags
             ):
-                self._logger.info(f"Pausing print job due to command {gcode}")
+                self._logger.info("Pausing print job due to command {}".format(gcode))
                 self.setPause(True)
 
             if gcode in self._blocked_commands:
@@ -5459,7 +5399,6 @@ class MachineCom:
                     },
                 )
                 return (None,)
-
             if gcode in self._ignored_commands:
                 message = "Not sending {} to printer, it's configured as an ignored command".format(
                     gcode
@@ -5479,18 +5418,14 @@ class MachineCom:
     def _command_phase_sending(
         self, cmd, cmd_type=None, gcode=None, subcode=None, *args, **kwargs
     ):
-        if (
-            gcode is not None
-            and gcode in self._long_running_commands
-            or cmd in self._long_running_commands
-        ):
+        if gcode is not None and gcode in self._long_running_commands:
             self._long_running_command = True
 
 
 ### MachineCom callback ################################################################################################
 
 
-class MachineComPrintCallback:
+class MachineComPrintCallback(object):
     def on_comm_log(self, message):
         pass
 
@@ -5566,7 +5501,7 @@ class MachineComPrintCallback:
 ### Printing file information classes ##################################################################################
 
 
-class PrintingFileInformation:
+class PrintingFileInformation(object):
     """
     Encapsulates information regarding the current file being printed: file name, current position, total size and
     time the print started.
@@ -5622,7 +5557,7 @@ class PrintingFileInformation:
         """
         Marks the print job as started and remembers the start time.
         """
-        self._start_time = time.monotonic()
+        self._start_time = monotonic_time()
         self._done = False
 
     def close(self):
@@ -5689,7 +5624,7 @@ class PrintingGcodeFileInformation(PrintingFileInformation):
         self._current_tool_callback = current_tool_callback
 
         if not os.path.exists(self._filename) or not os.path.isfile(self._filename):
-            raise OSError("File %s does not exist" % self._filename)
+            raise IOError("File %s does not exist" % self._filename)
         self._size = os.stat(self._filename).st_size
         self._pos = 0
         self._read_lines = 0
@@ -5709,17 +5644,18 @@ class PrintingGcodeFileInformation(PrintingFileInformation):
         """
         PrintingFileInformation.start(self)
         with self._handle_mutex:
-            bom = get_bom(self._filename, encoding="utf-8-sig")
-            self._handle = open(
-                self._filename, encoding="utf-8-sig", errors="replace", newline=""
+            self._handle = bom_aware_open(
+                self._filename, encoding="utf-8", errors="replace", newline=""
             )
             self._pos = self._handle.tell()
-            if bom:
+            if self._handle.encoding.endswith("-sig"):
                 # Apparently we found an utf-8 bom in the file.
                 # We need to add its length to our pos because it will
                 # be stripped transparently and we'll have no chance
                 # catching that.
-                self._pos += len(bom)
+                import codecs
+
+                self._pos += len(codecs.BOM_UTF8)
             self._read_lines = 0
 
     def close(self):
@@ -5741,7 +5677,9 @@ class PrintingGcodeFileInformation(PrintingFileInformation):
         """
         with self._handle_mutex:
             if self._handle is None:
-                self._logger.warning(f"File {self._filename} is not open for reading")
+                self._logger.warning(
+                    "File {} is not open for reading".format(self._filename)
+                )
                 return None, None, None
 
             try:
@@ -5786,8 +5724,8 @@ class PrintingGcodeFileInformation(PrintingFileInformation):
         return process_gcode_line(line, offsets=offsets, current_tool=current_tool)
 
     def _report_stats(self):
-        duration = time.monotonic() - self._start_time
-        self._logger.info(f"Finished in {duration:.3f} s.")
+        duration = monotonic_time() - self._start_time
+        self._logger.info("Finished in {:.3f} s.".format(duration))
         pass
 
 
@@ -5799,7 +5737,7 @@ class StreamingGcodeFileInformation(PrintingGcodeFileInformation):
 
     def start(self):
         PrintingGcodeFileInformation.start(self)
-        self._start_time = time.monotonic()
+        self._start_time = monotonic_time()
 
     def getLocalFilename(self):
         return self._localFilename
@@ -5811,7 +5749,7 @@ class StreamingGcodeFileInformation(PrintingGcodeFileInformation):
         return process_gcode_line(line)
 
     def _report_stats(self):
-        duration = time.monotonic() - self._start_time
+        duration = monotonic_time() - self._start_time
         read_lines = self._read_lines
         if duration > 0 and read_lines > 0:
             stats = {
@@ -5955,7 +5893,7 @@ class SendQueue(PrependableQueue):
         if item_type is not None:
             if item_type in self._lookup:
                 raise TypeAlreadyInQueue(
-                    item_type, f"Type {item_type} is already in queue"
+                    item_type, "Type {} is already in queue".format(item_type)
                 )
             else:
                 self._lookup.add(item_type)
@@ -5972,7 +5910,7 @@ class SendQueue(PrependableQueue):
         if item_type is not None:
             if item_type in self._lookup:
                 raise TypeAlreadyInQueue(
-                    item_type, f"Type {item_type} is already in queue"
+                    item_type, "Type {} is already in queue".format(item_type)
                 )
             else:
                 self._lookup.add(item_type)
@@ -6103,7 +6041,11 @@ def convert_pause_triggers(configured_triggers):
     for t in triggers.keys():
         if len(triggers[t]) > 0:
             result[t] = re.compile(
-                "|".join(map(lambda pattern: f"({pattern})", triggers[t]))
+                "|".join(
+                    map(
+                        lambda pattern: "({pattern})".format(pattern=pattern), triggers[t]
+                    )
+                )
             )
     return result
 
@@ -6264,31 +6206,27 @@ def parse_temperature_line(line, current):
     """
 
     result = {}
-    max_tool_num = 0
+    maxToolNum = 0
     for match in re.finditer(regex_temp, line):
         values = match.groupdict()
-        sensor = values["sensor"]
-        if sensor in result:
-            # sensor already seen, let's not overwrite stuff
-            continue
-
+        tool = values["tool"]
         toolnum = values.get("toolnum", None)
-        tool_number = int(toolnum) if toolnum is not None and len(toolnum) else None
-        if tool_number and tool_number > max_tool_num:
-            max_tool_num = tool_number
+        toolNumber = int(toolnum) if toolnum is not None and len(toolnum) else None
+        if toolNumber and toolNumber > maxToolNum:
+            maxToolNum = toolNumber
 
         try:
-            actual = float(values["actual"])
+            actual = float(match.group(3))
             target = None
-            if values["target"]:
-                target = float(values["target"])
+            if match.group(4) and match.group(5):
+                target = float(match.group(5))
 
-            result[sensor] = (actual, target)
+            result[tool] = (actual, target)
         except ValueError:
             # catch conversion issues, we'll rather just not get the temperature update instead of killing the connection
             pass
 
-    return max(max_tool_num, current), canonicalize_temperatures(result, current)
+    return max(maxToolNum, current), canonicalize_temperatures(result, current)
 
 
 def parse_firmware_line(line):
@@ -6487,31 +6425,31 @@ def _normalize_command_handler_result(
     be empty in which case the command is to be suppressed.
 
     Examples:
-        >>> _normalize_command_handler_result("M105", None, "M105", None, None, None)
+        >>> _normalize_command_handler_result("M105", None, "M105", None, None, None) # doctest: +ALLOW_UNICODE
         [('M105', None, 'M105', None, None)]
-        >>> _normalize_command_handler_result("M105", None, "M105", None, None, "M110")
+        >>> _normalize_command_handler_result("M105", None, "M105", None, None, "M110") # doctest: +ALLOW_UNICODE
         [('M110', None, 'M110', None, None)]
-        >>> _normalize_command_handler_result("M105", None, "M105", None, None, ["M110"])
+        >>> _normalize_command_handler_result("M105", None, "M105", None, None, ["M110"]) # doctest: +ALLOW_UNICODE
         [('M110', None, 'M110', None, None)]
-        >>> _normalize_command_handler_result("M105", None, "M105", None, None, ["M110", "M117 Foobar"])
+        >>> _normalize_command_handler_result("M105", None, "M105", None, None, ["M110", "M117 Foobar"]) # doctest: +ALLOW_UNICODE
         [('M110', None, 'M110', None, None), ('M117 Foobar', None, 'M117', None, None)]
-        >>> _normalize_command_handler_result("M105", None, "M105", None, None, [("M110",), "M117 Foobar"])
+        >>> _normalize_command_handler_result("M105", None, "M105", None, None, [("M110",), "M117 Foobar"]) # doctest: +ALLOW_UNICODE
         [('M110', None, 'M110', None, None), ('M117 Foobar', None, 'M117', None, None)]
-        >>> _normalize_command_handler_result("M105", None, "M105", None, None, [("M110", "lineno_reset"), "M117 Foobar"])
+        >>> _normalize_command_handler_result("M105", None, "M105", None, None, [("M110", "lineno_reset"), "M117 Foobar"]) # doctest: +ALLOW_UNICODE
         [('M110', 'lineno_reset', 'M110', None, None), ('M117 Foobar', None, 'M117', None, None)]
-        >>> _normalize_command_handler_result("M105", None, "M105", None, None, [])
+        >>> _normalize_command_handler_result("M105", None, "M105", None, None, []) # doctest: +ALLOW_UNICODE
         []
-        >>> _normalize_command_handler_result("M105", None, "M105", None, None, ["M110", None])
+        >>> _normalize_command_handler_result("M105", None, "M105", None, None, ["M110", None]) # doctest: +ALLOW_UNICODE
         [('M110', None, 'M110', None, None)]
-        >>> _normalize_command_handler_result("M105", None, "M105", None, None, [("M110",), (None, "ignored")])
+        >>> _normalize_command_handler_result("M105", None, "M105", None, None, [("M110",), (None, "ignored")]) # doctest: +ALLOW_UNICODE
         [('M110', None, 'M110', None, None)]
-        >>> _normalize_command_handler_result("M105", None, "M105", None, None, [("M110",), ("M117 Foobar", "display_message"), ("tuple", "of", "unexpected", "length"), ("M110", "lineno_reset")])
+        >>> _normalize_command_handler_result("M105", None, "M105", None, None, [("M110",), ("M117 Foobar", "display_message"), ("tuple", "of", "unexpected", "length"), ("M110", "lineno_reset")]) # doctest: +ALLOW_UNICODE
         [('M110', None, 'M110', None, None), ('M117 Foobar', 'display_message', 'M117', None, None), ('M110', 'lineno_reset', 'M110', None, None)]
-        >>> _normalize_command_handler_result("M105", None, "M105", None, {"tag1", "tag2"}, ["M110", "M117 Foobar"])
+        >>> _normalize_command_handler_result("M105", None, "M105", None, {"tag1", "tag2"}, ["M110", "M117 Foobar"]) # doctest: +ALLOW_UNICODE
         [('M110', None, 'M110', None, {'tag1', 'tag2'}), ('M117 Foobar', None, 'M117', None, {'tag1', 'tag2'})]
-        >>> _normalize_command_handler_result("M105", None, "M105", None, {"tag1", "tag2"}, ["M110", "M105", "M117 Foobar"], tags_to_add={"tag3"})
+        >>> _normalize_command_handler_result("M105", None, "M105", None, {"tag1", "tag2"}, ["M110", "M105", "M117 Foobar"], tags_to_add={"tag3"}) # doctest: +ALLOW_UNICODE
         [('M110', None, 'M110', None, {'tag1', 'tag2', 'tag3'}), ('M105', None, 'M105', None, {'tag1', 'tag2'}), ('M117 Foobar', None, 'M117', None, {'tag1', 'tag2', 'tag3'})]
-        >>> _normalize_command_handler_result("M105", None, "M105", None, {"tag1", "tag2"}, ["M110", ("M105", "temperature_poll"), "M117 Foobar"], tags_to_add={"tag3"})
+        >>> _normalize_command_handler_result("M105", None, "M105", None, {"tag1", "tag2"}, ["M110", ("M105", "temperature_poll"), "M117 Foobar"], tags_to_add={"tag3"}) # doctest: +ALLOW_UNICODE
         [('M110', None, 'M110', None, {'tag1', 'tag2', 'tag3'}), ('M105', 'temperature_poll', 'M105', None, {'tag1', 'tag2', 'tag3'}), ('M117 Foobar', None, 'M117', None, {'tag1', 'tag2', 'tag3'})]
 
     Arguments:
@@ -6560,7 +6498,7 @@ def _normalize_command_handler_result(
             # copy the tags
             tags = set(tags)
 
-        if isinstance(handler_result, str):
+        if isinstance(handler_result, basestring):
             # entry is just a string, replace command with it
             command = handler_result
 
@@ -6625,7 +6563,7 @@ def _normalize_command_handler_result(
     return result
 
 
-class QueueMarker:
+class QueueMarker(object):
     def __init__(self, callback):
         self.callback = callback
 
@@ -6724,12 +6662,14 @@ def upload_cli():
 
         def on_comm_file_transfer_started(self, filename, filesize, user=None):
             # transfer started, report
-            _logger.info(f"Started file transfer of {filename}, size {filesize}B")
+            _logger.info(
+                "Started file transfer of {}, size {}B".format(filename, filesize)
+            )
             self.started = True
 
         def on_comm_file_transfer_done(self, filename):
             # transfer done, report, print stats and finish
-            _logger.info(f"Finished file transfer of {filename}")
+            _logger.info("Finished file transfer of {}".format(filename))
             self.finished.set()
 
         def on_comm_state_change(self, state):

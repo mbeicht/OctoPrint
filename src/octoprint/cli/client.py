@@ -1,14 +1,18 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2015 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
+import io
 import json
 
 import click
+from past.builtins import unicode
 
 import octoprint_client
 from octoprint import FatalStartupError, init_settings
 from octoprint.cli import bulk_options, get_ctx_obj_option
-from octoprint.util import yaml
 
 click.disable_unicode_literals_warning = True
 
@@ -72,10 +76,15 @@ client_options = bulk_options(
 """Common options to configure an API client."""
 
 
-@click.group(context_settings={"ignore_unknown_options": True})
+@click.group()
+def client_commands():
+    pass
+
+
+@client_commands.group("client", context_settings={"ignore_unknown_options": True})
 @client_options
 @click.pass_context
-def cli(ctx, apikey, host, port, httpuser, httppass, https, prefix):
+def client(ctx, apikey, host, port, httpuser, httppass, https, prefix):
     """Basic API client."""
     try:
         settings = None
@@ -104,16 +113,16 @@ def cli(ctx, apikey, host, port, httpuser, httppass, https, prefix):
 
 def log_response(response, status_code=True, body=True, headers=False):
     if status_code:
-        click.echo(f"Status Code: {response.status_code}")
+        click.echo("Status Code: {}".format(response.status_code))
     if headers:
         for header, value in response.headers.items():
-            click.echo(f"{header}: {value}")
+            click.echo("{}: {}".format(header, value))
         click.echo()
     if body:
         click.echo(response.text)
 
 
-@cli.command("get")
+@client.command("get")
 @click.argument("path")
 @click.option("--timeout", type=float, default=None)
 @click.pass_context
@@ -123,7 +132,7 @@ def get(ctx, path, timeout):
     log_response(r)
 
 
-@cli.command("post_json")
+@client.command("post_json")
 @click.argument("path")
 @click.argument("data", type=JsonStringParamType())
 @click.option("--timeout", type=float, default=None)
@@ -134,7 +143,7 @@ def post_json(ctx, path, data, timeout):
     log_response(r)
 
 
-@cli.command("patch_json")
+@client.command("patch_json")
 @click.argument("path")
 @click.argument("data", type=JsonStringParamType())
 @click.option("--timeout", type=float, default=None, help="Request timeout in seconds")
@@ -145,7 +154,7 @@ def patch_json(ctx, path, data, timeout):
     log_response(r)
 
 
-@cli.command("post_from_file")
+@client.command("post_from_file")
 @click.argument("path")
 @click.argument(
     "file_path", type=click.Path(exists=True, dir_okay=False, resolve_path=True)
@@ -158,14 +167,17 @@ def post_from_file(ctx, path, file_path, json_flag, yaml_flag, timeout):
     """POSTs JSON data to the specified server path, taking the data from the specified file."""
     if json_flag or yaml_flag:
         if json_flag:
-            with open(file_path) as fp:
+            with io.open(file_path, "rt") as fp:
                 data = json.load(fp)
         else:
-            data = yaml.load_from_file(path=file_path)
+            import yaml
+
+            with io.open(file_path, "rt") as fp:
+                data = yaml.safe_load(fp)
 
         r = ctx.obj.client.post_json(path, data, timeout=timeout)
     else:
-        with open(file_path, "rb") as fp:
+        with io.open(file_path, "rb") as fp:
             data = fp.read()
 
         r = ctx.obj.client.post(path, data, timeout=timeout)
@@ -173,7 +185,7 @@ def post_from_file(ctx, path, file_path, json_flag, yaml_flag, timeout):
     log_response(r)
 
 
-@cli.command("command")
+@client.command("command")
 @click.argument("path")
 @click.argument("command")
 @click.option(
@@ -182,10 +194,10 @@ def post_from_file(ctx, path, file_path, json_flag, yaml_flag, timeout):
     "str_params",
     multiple=True,
     nargs=2,
-    type=click.Tuple([str, str]),
+    type=click.Tuple([unicode, unicode]),
 )
 @click.option(
-    "--int", "-i", "int_params", multiple=True, nargs=2, type=click.Tuple([str, int])
+    "--int", "-i", "int_params", multiple=True, nargs=2, type=click.Tuple([unicode, int])
 )
 @click.option(
     "--float",
@@ -193,7 +205,7 @@ def post_from_file(ctx, path, file_path, json_flag, yaml_flag, timeout):
     "float_params",
     multiple=True,
     nargs=2,
-    type=click.Tuple([str, float]),
+    type=click.Tuple([unicode, float]),
 )
 @click.option(
     "--bool",
@@ -201,7 +213,7 @@ def post_from_file(ctx, path, file_path, json_flag, yaml_flag, timeout):
     "bool_params",
     multiple=True,
     nargs=2,
-    type=click.Tuple([str, bool]),
+    type=click.Tuple([unicode, bool]),
 )
 @click.option("--timeout", type=float, default=None, help="Request timeout in seconds")
 @click.pass_context
@@ -217,7 +229,7 @@ def command(
     log_response(r, body=False)
 
 
-@cli.command("upload")
+@client.command("upload")
 @click.argument("path")
 @click.argument(
     "file_path", type=click.Path(exists=True, dir_okay=False, resolve_path=True)
@@ -228,7 +240,7 @@ def command(
     "params",
     multiple=True,
     nargs=2,
-    type=click.Tuple([str, str]),
+    type=click.Tuple([unicode, unicode]),
 )
 @click.option("--file-name", type=click.STRING)
 @click.option("--content-type", type=click.STRING)
@@ -251,7 +263,7 @@ def upload(ctx, path, file_path, params, file_name, content_type, timeout):
     log_response(r)
 
 
-@cli.command("delete")
+@client.command("delete")
 @click.argument("path")
 @click.option("--timeout", type=float, default=None, help="Request timeout in seconds")
 @click.pass_context
@@ -261,7 +273,7 @@ def delete(ctx, path, timeout):
     log_response(r)
 
 
-@cli.command("listen")
+@client.command("listen")
 @click.pass_context
 def listen(ctx):
     def on_connect(ws):
@@ -271,16 +283,18 @@ def listen(ctx):
         click.echo("--- Connection closed!")
 
     def on_error(ws, error):
-        click.echo(f"!!! Error: {error}")
+        click.echo("!!! Error: {}".format(error))
 
     def on_sent(ws, data):
-        click.echo(f">>> {json.dumps(data)}")
+        click.echo(">>> {}".format(json.dumps(data)))
 
     def on_heartbeat(ws):
         click.echo("<3")
 
     def on_message(ws, message_type, message_payload):
-        click.echo(f"<<< {message_type}, Payload: {json.dumps(message_payload)}")
+        click.echo(
+            "<<< {}, Payload: {}".format(message_type, json.dumps(message_payload))
+        )
 
     socket = ctx.obj.client.create_socket(
         on_connect=on_connect,

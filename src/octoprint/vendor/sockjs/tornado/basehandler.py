@@ -15,12 +15,18 @@ import logging
 from tornado.web import RequestHandler
 from tornado.gen import coroutine
 
-from urllib.parse import urlparse
+try:
+    # python 3
+    # noinspection PyCompatibility
+    from urllib.parse import urlparse
+except ImportError:
+    # python 2
+    # noinspection PyCompatibility
+    from urlparse import urlparse
 
 CACHE_TIME = 31536000
 
 LOG = logging.getLogger("tornado.general")
-
 
 class BaseHandler(RequestHandler):
     """Base request handler with set of helpers."""

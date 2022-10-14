@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __author__ = "Gina Häußge <gina@octoprint.org>"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2017 The OctoPrint Project - Released under terms of the AGPLv3 License"
@@ -6,8 +9,11 @@ import gzip
 import logging
 import os
 import re
-import threading
-from urllib import parse as urlparse
+
+try:
+    from urllib import parse as urlparse
+except ImportError:
+    import urlparse
 
 import webassets.filter.cssrewrite.urlpath as urlpath
 from webassets.bundle import Bundle
@@ -15,7 +21,6 @@ from webassets.filter import Filter
 from webassets.filter.cssrewrite.base import PatternRewriter
 from webassets.filter.rjsmin import rjsmin
 from webassets.merge import BaseHunk, MemoryHunk
-from webassets.version import Manifest
 
 
 def replace_url(source_url, output_url, url):
@@ -52,7 +57,7 @@ class UrlRewriter(PatternRewriter):
         )
         self.output_url = self.ctx.resolver.resolve_output_to_url(self.ctx, output)
 
-        return super().input(_in, out, **kw)
+        return super(UrlRewriter, self).input(_in, out, **kw)
 
     def replace_url(self, url):
         return replace_url(self.source_url, self.output_url, url)
@@ -66,7 +71,7 @@ class LessImportRewrite(UrlRewriter):
     def import_rewrite(self, m):
         import_with_options = m.group(1)
         import_url = self.replace_url(m.group(3))
-        return f'{import_with_options}"{import_url}";'
+        return '{import_with_options}"{import_url}";'.format(**locals())
 
 
 class SourceMapRewrite(UrlRewriter):
@@ -77,7 +82,7 @@ class SourceMapRewrite(UrlRewriter):
     def url_rewrite(self, m):
         mapping = m.group(1)
         source_url = self.replace_url(m.group(2))
-        return f"{mapping}{source_url}"
+        return "{mapping}{source_url}".format(**locals())
 
 
 class SourceMapRemove(PatternRewriter):
@@ -209,19 +214,3 @@ class JsPluginBundle(Bundle):
             (hunk, lambda x: x.replace("\n", "\n        ")),
             MemoryHunk(_PLUGIN_BUNDLE_WRAPPER_SUFFIX.format(plugin=self.plugin)),
         )
-
-
-class MemoryManifest(Manifest):
-    id = "memory"
-
-    def __init__(self, *args, **kwargs):
-        self.manifest = {}
-        self._lock = threading.RLock()
-
-    def remember(self, bundle, ctx, version):
-        with self._lock:
-            self.manifest[bundle.output] = version
-
-    def query(self, bundle, ctx):
-        with self._lock:
-            return self.manifest.get(bundle.output, None)

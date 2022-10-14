@@ -1,18 +1,26 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 
-import collections
 import datetime
 import fnmatch
-import glob
+import io
 import logging
 import os
-import queue
-import re
 import shutil
 import sys
 import threading
 import time
+
+try:
+    import queue
+except ImportError:
+    import Queue as queue
+
+import collections
+import re
 
 import requests
 import sarge
@@ -23,8 +31,14 @@ from octoprint.events import Events, eventManager
 from octoprint.plugin import plugin_manager
 from octoprint.settings import settings
 from octoprint.util import get_fully_qualified_classname as fqcn
-from octoprint.util import sv
+from octoprint.util import monotonic_time, sv
 from octoprint.util.commandline import CommandlineCaller
+
+try:
+    from os import scandir
+except ImportError:
+    from scandir import scandir
+
 
 # currently configured timelapse
 current = None
@@ -36,11 +50,6 @@ current_render_job = None
 _capture_format = "{prefix}-%d.jpg"
 _capture_glob = "{prefix}-*.jpg"
 _output_format = "{prefix}{postfix}.{extension}"
-
-# thumbnails
-_thumbnail_extension = ".thumb.jpg"
-_thumbnail_format = "{}.thumb.jpg"
-
 
 # ffmpeg progress regexes
 _ffmpeg_duration_regex = re.compile(r"Duration: (\d{2}):(\d{2}):(\d{2})\.\d{2}")
@@ -64,10 +73,6 @@ _job_lock = threading.RLock()
 
 # cached valid timelapse extensions
 _extensions = None
-
-
-def create_thumbnail_path(movie_path):
-    return _thumbnail_format.format(movie_path)
 
 
 def valid_timelapse(path):
@@ -96,20 +101,11 @@ def valid_timelapse(path):
     return util.is_allowed_file(path, _extensions)
 
 
-def valid_timelapse_thumbnail(path):
-    global _thumbnail_extensions
-    # Thumbnail path is valid if it ends with thumbnail extension and path without extension is valid timelpase
-    if path.endswith(_thumbnail_extension):
-        return valid_timelapse(path[: -len(_thumbnail_extension)])
-    else:
-        return False
-
-
 def _extract_prefix(filename):
     """
     >>> _extract_prefix("some_long_filename_without_hyphen.jpg")
     >>> _extract_prefix("-first_char_is_hyphen.jpg")
-    >>> _extract_prefix("some_long_filename_with-stuff.jpg")
+    >>> _extract_prefix("some_long_filename_with-stuff.jpg") # doctest: +ALLOW_UNICODE
     'some_long_filename_with'
     """
     pos = filename.rfind("-")
@@ -131,23 +127,14 @@ def last_modified_unrendered():
 def get_finished_timelapses():
     files = []
     basedir = settings().getBaseFolder("timelapse", check_writable=False)
-    for entry in os.scandir(basedir):
+    for entry in scandir(basedir):
         if util.is_hidden_path(entry.path) or not valid_timelapse(entry.path):
             continue
-
-        thumb = create_thumbnail_path(entry.path)
-        if os.path.isfile(thumb) is True:
-            thumb = os.path.basename(thumb)
-        else:
-            thumb = None
-
         files.append(
             {
                 "name": entry.name,
                 "size": util.get_formatted_size(entry.stat().st_size),
                 "bytes": entry.stat().st_size,
-                "thumbnail": thumb,
-                "timestamp": entry.stat().st_mtime,
                 "date": util.get_formatted_datetime(
                     datetime.datetime.fromtimestamp(entry.stat().st_mtime)
                 ),
@@ -167,7 +154,7 @@ def get_unrendered_timelapses():
         lambda: {"count": 0, "size": None, "bytes": 0, "date": None, "timestamp": None}
     )
 
-    for entry in os.scandir(basedir):
+    for entry in scandir(basedir):
         if not fnmatch.fnmatch(entry.name, "*.jpg"):
             continue
 
@@ -204,10 +191,10 @@ def get_unrendered_timelapses():
             return job
 
         return sorted(
-            (
+            [
                 util.dict_merge({"name": key}, finalize_fields(key, value))
                 for key, value in jobs.items()
-            ),
+            ],
             key=lambda x: sv(x["name"]),
         )
 
@@ -215,18 +202,18 @@ def get_unrendered_timelapses():
 def delete_unrendered_timelapse(name):
     global _cleanup_lock
 
-    pattern = f"{glob.escape(name)}*.jpg"
+    pattern = "{}*.jpg".format(util.glob_escape(name))
 
     basedir = settings().getBaseFolder("timelapse_tmp")
     with _cleanup_lock:
-        for entry in os.scandir(basedir):
+        for entry in scandir(basedir):
             try:
                 if fnmatch.fnmatch(entry.name, pattern):
                     os.remove(entry.path)
             except Exception:
                 if logging.getLogger(__name__).isEnabledFor(logging.DEBUG):
                     logging.getLogger(__name__).exception(
-                        f"Error while processing file {entry.name} during cleanup"
+                        "Error while processing file {} during cleanup".format(entry.name)
                     )
 
 
@@ -265,7 +252,7 @@ def delete_old_unrendered_timelapses():
     prefixes_to_clean = []
 
     with _cleanup_lock:
-        for entry in os.scandir(basedir):
+        for entry in scandir(basedir):
             try:
                 prefix = _extract_prefix(entry.name)
                 if prefix is None:
@@ -284,12 +271,14 @@ def delete_old_unrendered_timelapses():
             except Exception:
                 if logging.getLogger(__name__).isEnabledFor(logging.DEBUG):
                     logging.getLogger(__name__).exception(
-                        f"Error while processing file {entry.name} during cleanup"
+                        "Error while processing file {} during cleanup".format(entry.name)
                     )
 
         for prefix in prefixes_to_clean:
             delete_unrendered_timelapse(prefix)
-            logging.getLogger(__name__).info(f"Deleted old unrendered timelapse {prefix}")
+            logging.getLogger(__name__).info(
+                "Deleted old unrendered timelapse {}".format(prefix)
+            )
 
 
 def _create_render_start_handler(name, gcode=None):
@@ -479,7 +468,7 @@ def configure_timelapse(config=None, persist=False):
         settings().save()
 
 
-class Timelapse:
+class Timelapse(object):
     QUEUE_ENTRY_TYPE_CAPTURE = "capture"
     QUEUE_ENTRY_TYPE_CALLBACK = "callback"
 
@@ -604,8 +593,7 @@ class Timelapse:
         self._in_timelapse = True
         self._gcode_file = os.path.basename(gcode_file)
         self._file_prefix = "{}_{}".format(
-            os.path.splitext(self._gcode_file)[0].replace("%", "%%"),
-            time.strftime("%Y%m%d%H%M%S"),
+            os.path.splitext(self._gcode_file)[0], time.strftime("%Y%m%d%H%M%S")
         )
 
     def stop_timelapse(self, do_create_movie=True, success=True):
@@ -706,7 +694,7 @@ class Timelapse:
             )
             self._image_number += 1
 
-        self._logger.debug(f"Capturing image to {filename}")
+        self._logger.debug("Capturing image to {}".format(filename))
         entry = {
             "type": self.__class__.QUEUE_ENTRY_TYPE_CAPTURE,
             "filename": filename,
@@ -742,15 +730,19 @@ class Timelapse:
 
     def _perform_capture(self, filename, onerror=None):
         # pre-capture hook
-        for name, hook in self._pre_capture_hooks.items():
+        for hook in self._pre_capture_hooks.values():
             try:
                 hook(filename)
             except Exception:
-                self._logger.exception(f"Error while processing hook {name}.")
+                self._logger.exception(
+                    "Error while processing hook {name}.".format(**locals())
+                )
 
         eventManager().fire(Events.CAPTURE_START, {"file": filename})
         try:
-            self._logger.debug(f"Going to capture {filename} from {self._snapshot_url}")
+            self._logger.debug(
+                "Going to capture {} from {}".format(filename, self._snapshot_url)
+            )
             r = requests.get(
                 self._snapshot_url,
                 stream=True,
@@ -759,16 +751,18 @@ class Timelapse:
             )
             r.raise_for_status()
 
-            with open(filename, "wb") as f:
+            with io.open(filename, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024):
                     if chunk:
                         f.write(chunk)
                         f.flush()
 
-            self._logger.debug(f"Image {filename} captured from {self._snapshot_url}")
+            self._logger.debug(
+                "Image {} captured from {}".format(filename, self._snapshot_url)
+            )
         except Exception as e:
             self._logger.exception(
-                f"Could not capture image {filename} from {self._snapshot_url}"
+                "Could not capture image {} from {}".format(filename, self._snapshot_url)
             )
             self._capture_errors += 1
             err = e
@@ -777,11 +771,13 @@ class Timelapse:
             err = None
 
         # post-capture hook
-        for name, hook in self._post_capture_hooks.items():
+        for hook in self._post_capture_hooks.values():
             try:
                 hook(filename, err is None)
             except Exception:
-                self._logger.exception(f"Error while processing hook {name}.")
+                self._logger.exception(
+                    "Error while processing hook {name}.".format(**locals())
+                )
 
         # handle events and onerror call
         if err is None:
@@ -865,7 +861,7 @@ class ZTimelapse(Timelapse):
                 return
 
         # check if last picture has been less than min_delay ago, if so don't take a picture (anti vase mode...)
-        now = time.monotonic()
+        now = monotonic_time()
         if (
             self._min_delay
             and self._last_snapshot
@@ -927,7 +923,7 @@ class TimedTimelapse(Timelapse):
         self._timer = None
 
 
-class TimelapseRenderJob:
+class TimelapseRenderJob(object):
 
     render_job_lock = threading.RLock()
 
@@ -1010,7 +1006,7 @@ class TimelapseRenderJob:
             postfix=self._postfix if self._postfix is not None else "",
             extension=extension,
         )
-        temporary = os.path.join(self._output_dir, f".{output_name}")
+        temporary = os.path.join(self._output_dir, ".{}".format(output_name))
         output = os.path.join(self._output_dir, output_name)
 
         for i in range(4):
@@ -1052,7 +1048,7 @@ class TimelapseRenderJob:
             rotate=rotate,
             watermark=watermark,
         )
-        self._logger.debug(f"Executing command: {command_str}")
+        self._logger.debug("Executing command: {}".format(command_str))
 
         with self.render_job_lock:
             try:
@@ -1070,10 +1066,6 @@ class TimelapseRenderJob:
 
                 if returncode == 0:
                     shutil.move(temporary, output)
-                    self._try_generate_thumbnail(
-                        ffmpeg=ffmpeg,
-                        movie_path=output,
-                    )
                     self._notify_callback("success", output)
                 else:
                     self._logger.warning(
@@ -1097,7 +1089,7 @@ class TimelapseRenderJob:
                         os.remove(temporary)
                 except Exception:
                     self._logger.warning(
-                        f"Could not delete temporary timelapse {temporary}"
+                        "Could not delete temporary timelapse {}".format(temporary)
                     )
                 self._notify_callback("always", output)
 
@@ -1120,41 +1112,6 @@ class TimelapseRenderJob:
                 duration = _ffmpeg_duration_regex.search(line)
                 if duration is not None:
                     self._parsed_duration = self._convert_time(*duration.groups())
-
-    @classmethod
-    def _try_generate_thumbnail(cls, ffmpeg, movie_path):
-        logger = logging.getLogger(__name__)
-
-        try:
-            thumb_path = create_thumbnail_path(movie_path)
-            commandline = settings().get(["webcam", "ffmpegThumbnailCommandline"])
-            thumb_command_str = cls._create_ffmpeg_command_string(
-                commandline=commandline,
-                ffmpeg=ffmpeg,
-                input=movie_path,
-                output=thumb_path,
-                fps=None,
-                videocodec=None,
-                threads=None,
-                bitrate=None,
-            )
-            c = CommandlineCaller()
-            returncode, stdout_text, stderr_text = c.call(
-                thumb_command_str, delimiter=b"\r", buffer_size=512
-            )
-            if returncode != 0:
-                logger.warning(
-                    "Failed to generate optional thumbnail %r: %s"
-                    % (returncode, stderr_text)
-                )
-            return True
-        except Exception as ex:
-            logger.warning(
-                "Failed to generate thumbnail from {} to {} ({})".format(
-                    movie_path, thumb_path, ex
-                )
-            )
-            return False
 
     @staticmethod
     def _convert_time(hours, minutes, seconds):
@@ -1229,7 +1186,7 @@ class TimelapseRenderJob:
             else "",
         }
 
-        logger.debug(f"Rendering movie to {output}")
+        logger.debug("Rendering movie to {}".format(output))
         return commandline.format(**placeholders)
 
     @classmethod
@@ -1253,7 +1210,7 @@ class TimelapseRenderJob:
         ### See unit tests in test/timelapse/test_timelapse_renderjob.py
 
         # apply pixel format
-        filters = [f"format={pixfmt}"]
+        filters = ["format={}".format(pixfmt)]
 
         # flip video if configured
         if hflip:
@@ -1285,7 +1242,7 @@ class TimelapseRenderJob:
 
     def _notify_callback(self, callback, *args, **kwargs):
         """Notifies registered callbacks of type `callback`."""
-        name = f"_on_{callback}"
+        name = "_on_{}".format(callback)
         method = getattr(self, name, None)
         if method is not None and callable(method):
             method(*args, **kwargs)

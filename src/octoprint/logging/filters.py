@@ -1,5 +1,12 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 import logging
-import urllib.parse
+
+try:
+    from urllib import parse as urlparse
+except ImportError:
+    import urlparse
 
 
 class TornadoAccessFilter(logging.Filter):
@@ -9,14 +16,14 @@ class TornadoAccessFilter(logging.Filter):
 
             if status == 409:
 
-                _, url, _ = request_line.split()
-                u = urllib.parse.urlparse(url)
+                method, url, client = request_line.split()
+                u = urlparse.urlparse(url)
                 if u.path in ("/api/printer",):
                     record.levelno = logging.INFO
                     record.levelname = logging.getLevelName(record.levelno)
         except Exception:
             logging.getLogger(__name__).exception(
-                f"Error while filtering log record {record!r}"
+                "Error while filtering log record {!r}".format(record)
             )
 
         return logging.Filter.filter(self, record)

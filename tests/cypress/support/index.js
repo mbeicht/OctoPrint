@@ -21,3 +21,4 @@ import "./commands";
 
 require("cypress-terminal-report/src/installLogsCollector")();
 require("cypress-commands");
+require("cypress-plugin-retries");

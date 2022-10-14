@@ -1,11 +1,12 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2017 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
 import sys
 
 import click
-
-from octoprint.util import yaml
 
 click.disable_unicode_literals_warning = True
 
@@ -55,12 +56,17 @@ def validate_result(result):
 
 
 @click.group()
-def cli():
+def analysis_commands():
+    pass
+
+
+@analysis_commands.group(name="analysis")
+def util():
     """Analysis tools."""
     pass
 
 
-@cli.command(name="gcode")
+@util.command(name="gcode")
 @click.option("--throttle", "throttle", type=float, default=None)
 @click.option("--throttle-lines", "throttle_lines", type=int, default=None)
 @click.option("--speed-x", "speedx", type=float, default=6000)
@@ -91,6 +97,9 @@ def gcode_command(
 
     import time
 
+    import yaml
+
+    from octoprint.util import monotonic_time
     from octoprint.util.gcodeInterpreter import gcode
 
     throttle_callback = None
@@ -110,13 +119,13 @@ def gcode_command(
     if len(offsets) < maxt:
         offsets += [(0, 0)] * (maxt - len(offsets))
 
-    start_time = time.monotonic()
+    start_time = monotonic_time()
 
     progress_callback = None
     if progress:
 
         def progress_callback(percentage):
-            click.echo(f"PROGRESS:{percentage}")
+            click.echo("PROGRESS:{}".format(percentage))
 
     interpreter = gcode(progress_callback=progress_callback, incl_layers=layers)
 
@@ -131,7 +140,7 @@ def gcode_command(
         bed_z=bedz,
     )
 
-    click.echo(f"DONE:{time.monotonic() - start_time}s")
+    click.echo("DONE:{}s".format(monotonic_time() - start_time))
 
     result = interpreter.get_result()
     if empty_result(result):
@@ -147,7 +156,14 @@ def gcode_command(
         sys.exit(-1)
 
     click.echo("RESULTS:")
-    click.echo(yaml.dump(interpreter.get_result(), pretty=True))
+    click.echo(
+        yaml.safe_dump(
+            interpreter.get_result(),
+            default_flow_style=False,
+            indent=2,
+            allow_unicode=True,
+        )
+    )
 
 
 if __name__ == "__main__":

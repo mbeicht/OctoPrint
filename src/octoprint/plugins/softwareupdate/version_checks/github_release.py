@@ -1,3 +1,8 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function
+
+# MO unicode_literals because fixing all the doctests is too annoying :-P
+
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms of the AGPLv3 License"
@@ -105,6 +110,8 @@ def _get_latest_release(
 ):
     from ..exceptions import NetworkError
 
+    nothing = None, None, None
+
     headers = {}
     if apikey:
         auth = "token " + apikey
@@ -117,10 +124,12 @@ def _get_latest_release(
     except requests.ConnectionError as exc:
         raise NetworkError(cause=exc)
 
-    from . import check_github_apiresponse, check_github_ratelimit
+    from . import log_github_ratelimit
 
-    check_github_ratelimit(logger, r)
-    check_github_apiresponse(logger, r)
+    log_github_ratelimit(logger, r)
+
+    if not r.status_code == requests.codes.ok:
+        return nothing
 
     releases = r.json()
 
@@ -168,13 +177,33 @@ def _get_sanitized_version(version_string):
     return version_string
 
 
+def _get_base_from_version_tuple(version_tuple):
+    """
+    Reduces version tuple to base version.
+
+    Tests:
+
+        >>> _get_base_from_version_tuple(("1", "2", "15"))
+        ('1', '2', '15')
+        >>> _get_base_from_version_tuple(("1", "2", "15", "*", "dev12"))
+        ('1', '2', '15')
+    """
+
+    base_version = []
+    for part in version_tuple:
+        if part.startswith("*"):
+            break
+        base_version.append(part)
+    return tuple(base_version)
+
+
 def _get_comparable_version_semantic(version_string, force_base=True):
     import semantic_version
 
     version = semantic_version.Version.coerce(version_string, partial=False)
 
     if force_base:
-        version_string = f"{version.major}.{version.minor}.{version.patch}"
+        version_string = "{}.{}.{}".format(version.major, version.minor, version.patch)
         version = semantic_version.Version.coerce(version_string, partial=False)
 
     return version
@@ -331,7 +360,7 @@ def get_latest(
         "release_notes": release_notes,
     }
 
-    logger.debug(f"Target: {target}, local: {current}, remote: {remote_tag}")
+    logger.debug("Target: {}, local: {}, remote: {}".format(target, current, remote_tag))
 
     return information, _is_current(
         information, compare_type, custom=custom_compare, force_base=force_base

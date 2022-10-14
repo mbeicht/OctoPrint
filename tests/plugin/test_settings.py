@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms of the AGPLv3 License"
@@ -5,12 +8,13 @@ __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms
 
 import unittest
 import warnings
-from unittest import mock
 
+import mock
 from ddt import data, ddt, unpack
 
 import octoprint.plugin
 import octoprint.settings
+from octoprint.util import to_native_str
 
 
 @ddt
@@ -144,8 +148,8 @@ class SettingsTestCase(unittest.TestCase):
             called_method = getattr(self.settings, forwarded)
 
             # further mock out our mocked function so things work as they should
-            called_method.__name__ = forwarded
-            called_method.__qualname__ = forwarded
+            called_method.__name__ = to_native_str(forwarded)
+            called_method.__qualname__ = to_native_str(forwarded)
             called_method.__annotations__ = {}
 
             method = getattr(self.plugin_settings, deprecated)
@@ -161,7 +165,8 @@ class SettingsTestCase(unittest.TestCase):
             self.assertEqual(1, len(w))
             self.assertTrue(issubclass(w[-1].category, DeprecationWarning))
             self.assertTrue(
-                f"{deprecated} has been renamed to {current}" in str(w[-1].message)
+                "{old} has been renamed to {new}".format(old=deprecated, new=current)
+                in str(w[-1].message)
             )
 
     @data(
@@ -383,8 +388,8 @@ class SettingsTestCase(unittest.TestCase):
             called_method = getattr(self.settings, forwarded)
 
             # further mock out our mocked function so things work as they should
-            called_method.__name__ = forwarded
-            called_method.__qualname__ = forwarded
+            called_method.__name__ = to_native_str(forwarded)
+            called_method.__qualname__ = to_native_str(forwarded)
             called_method.__annotations__ = {}
 
             method = getattr(self.plugin_settings, deprecated)
@@ -401,7 +406,8 @@ class SettingsTestCase(unittest.TestCase):
             self.assertEqual(1, len(w))
             self.assertTrue(issubclass(w[-1].category, DeprecationWarning))
             self.assertTrue(
-                f"{deprecated} has been renamed to {current}" in str(w[-1].message)
+                "{old} has been renamed to {new}".format(old=deprecated, new=current)
+                in str(w[-1].message)
             )
 
     def test_global_get_basefolder(self):
@@ -417,7 +423,7 @@ class SettingsTestCase(unittest.TestCase):
 
         self.settings.getBaseFolder.assert_called_once_with("logs")
         self.assertEqual(
-            f"/some/folder/plugin_{self.plugin_key}.log",
+            "/some/folder/plugin_{key}.log".format(key=self.plugin_key),
             path.replace(os.sep, "/"),
         )
 
@@ -430,7 +436,7 @@ class SettingsTestCase(unittest.TestCase):
 
         self.settings.getBaseFolder.assert_called_once_with("logs")
         self.assertEqual(
-            f"/some/folder/plugin_{self.plugin_key}_mypostfix.log",
+            "/some/folder/plugin_{key}_mypostfix.log".format(key=self.plugin_key),
             path.replace(os.sep, "/"),
         )
 

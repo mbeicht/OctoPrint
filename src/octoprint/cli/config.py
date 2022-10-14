@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2015 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
@@ -7,10 +10,10 @@ import logging
 import pprint
 
 import click
+import yaml
 
 from octoprint import FatalStartupError, init_settings
 from octoprint.cli import get_ctx_obj_option, standard_options
-from octoprint.util import yaml
 
 click.disable_unicode_literals_warning = True
 
@@ -45,8 +48,13 @@ def _set_helper(settings, path, value, data_type=None):
 
 
 @click.group()
+def config_commands():
+    pass
+
+
+@config_commands.group(name="config")
 @click.pass_context
-def cli(ctx):
+def config(ctx):
     """Basic config manipulation."""
     logging.basicConfig(
         level=logging.DEBUG
@@ -65,7 +73,7 @@ def cli(ctx):
         ctx.exit(-1)
 
 
-@cli.command(name="set")
+@config.command(name="set")
 @standard_options(hidden=True)
 @click.argument("path", type=click.STRING)
 @click.argument("value", type=click.STRING)
@@ -94,7 +102,7 @@ def set_command(ctx, path, value, as_bool, as_float, as_int, as_json):
     _set_helper(ctx.obj.settings, path, value, data_type=data_type)
 
 
-@cli.command(name="remove")
+@config.command(name="remove")
 @standard_options(hidden=True)
 @click.argument("path", type=click.STRING)
 @click.pass_context
@@ -103,7 +111,7 @@ def remove_command(ctx, path):
     _set_helper(ctx.obj.settings, path, None)
 
 
-@cli.command(name="append_value")
+@config.command(name="append_value")
 @standard_options(hidden=True)
 @click.argument("path", type=click.STRING)
 @click.argument("value", type=click.STRING)
@@ -131,7 +139,7 @@ def append_value_command(ctx, path, value, as_json=False):
     _set_helper(ctx.obj.settings, path, current)
 
 
-@cli.command(name="insert_value")
+@config.command(name="insert_value")
 @standard_options(hidden=True)
 @click.argument("path", type=click.STRING)
 @click.argument("index", type=click.INT)
@@ -160,7 +168,7 @@ def insert_value_command(ctx, path, index, value, as_json=False):
     _set_helper(ctx.obj.settings, path, current)
 
 
-@cli.command(name="remove_value")
+@config.command(name="remove_value")
 @standard_options(hidden=True)
 @click.argument("path", type=click.STRING)
 @click.argument("value", type=click.STRING)
@@ -192,7 +200,7 @@ def remove_value_command(ctx, path, value, as_json=False):
     _set_helper(ctx.obj.settings, path, current)
 
 
-@cli.command(name="get")
+@config.command(name="get")
 @click.argument("path", type=click.STRING)
 @click.option("--json", "as_json", is_flag=True, help="Output value formatted as JSON")
 @click.option("--yaml", "as_yaml", is_flag=True, help="Output value formatted as YAML")
@@ -209,7 +217,9 @@ def get_command(ctx, path, as_json=False, as_yaml=False, as_raw=False):
     if as_json:
         output = json.dumps(value)
     elif as_yaml:
-        output = yaml.dump(value, pretty=True)
+        output = yaml.safe_dump(
+            value, default_flow_style=False, indent=2, allow_unicode=True
+        )
     elif as_raw:
         output = value
     else:
@@ -218,7 +228,7 @@ def get_command(ctx, path, as_json=False, as_yaml=False, as_raw=False):
     click.echo(output)
 
 
-@cli.command(name="effective")
+@config.command(name="effective")
 @click.option("--json", "as_json", is_flag=True, help="Output value formatted as JSON")
 @click.option("--yaml", "as_yaml", is_flag=True, help="Output value formatted as YAML")
 @click.option(
@@ -233,7 +243,9 @@ def effective_command(ctx, as_json=False, as_yaml=False, as_raw=False):
     if as_json:
         output = json.dumps(value)
     elif as_yaml:
-        output = yaml.dump(value, pretty=True)
+        output = yaml.safe_dump(
+            value, default_flow_style=False, indent=2, allow_unicode=True
+        )
     elif as_raw:
         output = value
     else:

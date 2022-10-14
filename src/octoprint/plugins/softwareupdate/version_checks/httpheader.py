@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2020 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
@@ -26,7 +29,7 @@ def get_latest(target, check, online=True, *args, **kwargs):
     method = check.get("header_method", "head")
     prefix = check.get("header_prefix", header)
     if prefix:
-        prefix = f"{prefix} "
+        prefix = "{} ".format(prefix)
 
     try:
         with requests.request(method, url) as r:

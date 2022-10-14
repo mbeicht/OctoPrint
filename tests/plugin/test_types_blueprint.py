@@ -1,5 +1,9 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 import unittest
-from unittest import mock
+
+import mock
 
 import octoprint.plugin
 
@@ -134,7 +138,9 @@ class BlueprintPluginTest(unittest.TestCase):
 
         self.assertEqual(result, blueprint)
 
-        MockBlueprint.assert_called_once_with("myplugin", "myplugin", **expected_kwargs)
+        MockBlueprint.assert_called_once_with(
+            "plugin.myplugin", "myplugin", **expected_kwargs
+        )
         blueprint.add_url_rule.assert_called_once_with(
             "/some/path", "route_method", view_func=plugin.route_method, methods=["GET"]
         )

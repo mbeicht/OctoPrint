@@ -1,17 +1,21 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
+import io
 import logging
 import os
-import time
 from collections import namedtuple
+
+from past.builtins import basestring
 
 import octoprint.plugin
 import octoprint.util
 from octoprint.events import Events, eventManager
 from octoprint.util import get_fully_qualified_classname as fqcn
-from octoprint.util import yaml
 
 from .analysis import AnalysisQueue, QueueEntry  # noqa: F401
 from .destinations import FileDestinations  # noqa: F401
@@ -219,7 +223,7 @@ class NoSuchStorage(Exception):
     pass
 
 
-class FileManager:
+class FileManager(object):
     def __init__(
         self,
         analysis_queue,
@@ -269,7 +273,9 @@ class FileManager:
 
         def worker():
             self._logger.info(
-                "Adding backlog items from all storage types to analysis queue..."
+                "Adding backlog items from all storage types to analysis queue...".format(
+                    **locals()
+                )
             )
             for storage_type, storage_manager in self._storage_managers.items():
                 self._determine_analysis_backlog(storage_type, storage_manager)
@@ -326,11 +332,15 @@ class FileManager:
 
         if root:
             self._logger.info(
-                f'Added {counter} items from storage type "{storage_type}" and root "{root}" to analysis queue'
+                'Added {counter} items from storage type "{storage_type}" and root "{root}" to analysis queue'.format(
+                    **locals()
+                )
             )
         else:
             self._logger.info(
-                f'Added {counter} items from storage type "{storage_type}" to analysis queue'
+                'Added {counter} items from storage type "{storage_type}" to analysis queue'.format(
+                    **locals()
+                )
             )
 
     def add_storage(self, storage_type, storage_manager):
@@ -446,9 +456,9 @@ class FileManager:
                     file_obj = StreamWrapper(
                         os.path.basename(dest_path),
                         io.BytesIO(
-                            f";Generated from {stl_name} (hash: {hash})\n".encode(
-                                "ascii", "replace"
-                            )
+                            ";Generated from {stl_name} (hash: {hash})\n".format(
+                                **locals()
+                            ).encode("ascii", "replace")
                         ),
                         io.FileIO(tmp_path, "rb"),
                     )
@@ -467,7 +477,7 @@ class FileManager:
                         analysis=_analysis,
                     )
 
-                    end_time = time.monotonic()
+                    end_time = octoprint.util.monotonic_time()
                     eventManager().fire(
                         Events.SLICING_DONE,
                         {
@@ -498,7 +508,7 @@ class FileManager:
 
         slicer = self._slicing_manager.get_slicer(slicer_name)
 
-        start_time = time.monotonic()
+        start_time = octoprint.util.monotonic_time()
         eventManager().fire(
             Events.SLICING_STARTED,
             {
@@ -670,7 +680,7 @@ class FileManager:
     ):
         if not destinations:
             destinations = list(self._storage_managers.keys())
-        if isinstance(destinations, str):
+        if isinstance(destinations, basestring):
             destinations = [destinations]
 
         result = {}
@@ -823,19 +833,6 @@ class FileManager:
                 "type": get_file_type(dst_name),
             },
         )
-        eventManager().fire(
-            Events.FILE_MOVED,
-            {
-                "storage": destination,
-                "source_path": source_path_in_storage,
-                "source_name": source_name,
-                "source_type": get_file_type(source_name),
-                "destination_path": dst_path_in_storage,
-                "destination_name": dst_name,
-                "destination_type": get_file_type(dst_name),
-            },
-        )
-
         eventManager().fire(Events.UPDATED_FILES, {"type": "printables"})
 
     def add_folder(self, destination, path, ignore_existing=True, display=None):
@@ -897,17 +894,6 @@ class FileManager:
             Events.FOLDER_ADDED,
             {"storage": destination, "path": dst_path_in_storage, "name": dst_name},
         )
-        eventManager().fire(
-            Events.FOLDER_MOVED,
-            {
-                "storage": destination,
-                "source_path": source_path_in_storage,
-                "source_name": source_name,
-                "destination_path": dst_path_in_storage,
-                "destination_name": dst_name,
-            },
-        )
-
         eventManager().fire(Events.UPDATED_FILES, {"type": "printables"})
 
     def has_analysis(self, destination, path):
@@ -955,6 +941,8 @@ class FileManager:
     def save_recovery_data(self, origin, path, pos):
         import time
 
+        import yaml
+
         from octoprint.util import atomic_write
 
         data = {
@@ -965,10 +953,12 @@ class FileManager:
         }
         try:
             with atomic_write(self._recovery_file, mode="wt", max_permissions=0o666) as f:
-                yaml.save_to_file(data, file=f, pretty=True)
+                yaml.safe_dump(
+                    data, stream=f, default_flow_style=False, indent=2, allow_unicode=True
+                )
         except Exception:
             self._logger.exception(
-                f"Could not write recovery data to file {self._recovery_file}"
+                "Could not write recovery data to file {}".format(self._recovery_file)
             )
 
     def delete_recovery_data(self):
@@ -979,16 +969,18 @@ class FileManager:
             os.remove(self._recovery_file)
         except Exception:
             self._logger.exception(
-                f"Error deleting recovery data file {self._recovery_file}"
+                "Error deleting recovery data file {}".format(self._recovery_file)
             )
 
     def get_recovery_data(self):
         if not os.path.isfile(self._recovery_file):
             return None
 
-        try:
-            data = yaml.load_from_file(path=self._recovery_file)
+        import yaml
 
+        try:
+            with io.open(self._recovery_file, "rt", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
             if not isinstance(data, dict) or not all(
                 map(lambda x: x in data, ("origin", "path", "pos", "date"))
             ):
@@ -996,7 +988,7 @@ class FileManager:
             return data
         except Exception:
             self._logger.exception(
-                f"Could not read recovery data from file {self._recovery_file}"
+                "Could not read recovery data from file {}".format(self._recovery_file)
             )
             self.delete_recovery_data()
 
@@ -1042,7 +1034,9 @@ class FileManager:
 
     def _storage(self, destination):
         if destination not in self._storage_managers:
-            raise NoSuchStorage(f"No storage configured for destination {destination}")
+            raise NoSuchStorage(
+                "No storage configured for destination {destination}".format(**locals())
+            )
         return self._storage_managers[destination]
 
     def _add_analysis_result(self, destination, path, result):

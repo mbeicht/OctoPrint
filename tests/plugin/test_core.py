@@ -1,15 +1,19 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 import unittest
-from unittest import mock
 
 import ddt
+import mock
 
 import octoprint.plugin
 import octoprint.plugin.core
+from octoprint.util import to_native_str
 
 ##~~ Helpers for testing mixin type extraction
 
 
-class A:
+class A(object):
     pass
 
 
@@ -29,7 +33,7 @@ class A1_1(A_1):
     pass
 
 
-class B:
+class B(object):
     pass
 
 
@@ -37,7 +41,7 @@ class B_1(B):
     pass
 
 
-class C:
+class C(object):
     pass
 
 
@@ -45,7 +49,7 @@ class C_1(C):
     pass
 
 
-class D:
+class D(object):
     pass
 
 
@@ -438,7 +442,7 @@ class PluginTestCase(unittest.TestCase):
     )
     @ddt.unpack
     def test_mixins_matching_bases(self, bases_to_set, bases_to_check, expected):
-        Foo = type("Foo", bases_to_set, {})
+        Foo = type(to_native_str("Foo"), bases_to_set, {})
         actual = octoprint.plugin.core.PluginManager.mixins_matching_bases(
             Foo, *bases_to_check
         )

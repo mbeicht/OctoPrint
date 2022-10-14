@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms of the AGPLv3 License"
@@ -12,26 +15,24 @@ def can_perform_update(target, check, online=True):
     )
 
 
-def perform_update(target, check, target_version, log_cb=None, online=True, force=False):
+def perform_update(target, check, target_version, log_cb=None, online=True):
     from ..exceptions import CannotUpdateOffline
 
     if not online and not check("offline", False):
         raise CannotUpdateOffline()
 
-    kwargs = {"log_cb": log_cb, "online": online, "force": force}
     try:
         return check["python_updater"].perform_update(
-            target, check, target_version, **kwargs
+            target, check, target_version, log_cb=log_cb, online=online
         )
     except Exception:
         import inspect
 
         args, _, _, _ = inspect.getargspec(check["python_updater"].perform_update)
-        if not all(k in args for k in kwargs):
-            # old python_updater footprint, leave out what it doesn't understand
-            old_kwargs = {k: v for k, v in kwargs.items() if k in args}
+        if "online" not in args:
+            # old python_updater footprint, simply leave out the online parameter
             return check["python_updater"].perform_update(
-                target, check, target_version, **old_kwargs
+                target, check, target_version, log_cb=log_cb
             )
 
         # some other error, raise again

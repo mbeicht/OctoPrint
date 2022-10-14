@@ -286,7 +286,7 @@ $(function () {
                 display = "line";
             }
 
-            if (type === undefined || typeof type != "string") {
+            if (type === undefined) {
                 if (line.startsWith("Recv:")) {
                     type = "recv";
                 } else if (line.startsWith("Send:")) {

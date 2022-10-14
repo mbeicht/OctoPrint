@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2015 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
@@ -131,15 +134,20 @@ class OctoPrintPluginCommands(click.MultiCommand):
                     result[name + self.sep + command.name] = command
             except Exception:
                 self._logger.exception(
-                    f"Error while retrieving cli commands for plugin {name}",
+                    "Error while retrieving cli commands for plugin {}".format(name),
                     extra={"plugin": name},
                 )
 
         return result
 
 
-@click.group(cls=OctoPrintPluginCommands)
+@click.group()
 @pass_octoprint_ctx
-def cli(obj):
+def plugin_commands(obj):
+    pass
+
+
+@plugin_commands.group(name="plugins", cls=OctoPrintPluginCommands)
+def plugins():
     """Additional commands provided by plugins."""
     pass

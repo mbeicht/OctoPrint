@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __author__ = "Gina Häußge <osd@foosel.net> based on work by David Braam"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2013 David Braam, Gina Häußge - Released under terms of the AGPLv3 License"
@@ -13,7 +16,7 @@ import re
 import zlib
 
 
-class Vector3D:
+class Vector3D(object):
     """
     3D vector value
 
@@ -123,7 +126,7 @@ class Vector3D:
         )
 
 
-class MinMax3D:
+class MinMax3D(object):
     """
     Tracks minimum and maximum of recorded values
 
@@ -207,7 +210,7 @@ regex_command = re.compile(
 """Regex for a GCODE command."""
 
 
-class gcode:
+class gcode(object):
     def __init__(self, incl_layers=False, progress_callback=None):
         self._logger = logging.getLogger(__name__)
         self.extrusionAmount = [0]
@@ -422,7 +425,7 @@ class gcode:
                     tool = int(values["tool"])
 
             # G codes
-            if gcode in ("G0", "G1", "G00", "G01"):  # Move
+            if gcode in ("G0", "G1"):  # Move
                 x = getCodeFloat(line, "X")
                 y = getCodeFloat(line, "Y")
                 z = getCodeFloat(line, "Z")
@@ -497,7 +500,7 @@ class gcode:
                 if e:
                     self._track_layer(pos)
 
-            if gcode in ("G2", "G3", "G02", "G03"):  # Arc Move
+            if gcode in ("G2", "G3"):  # Arc Move
                 x = getCodeFloat(line, "X")
                 y = getCodeFloat(line, "Y")
                 z = getCodeFloat(line, "Z")

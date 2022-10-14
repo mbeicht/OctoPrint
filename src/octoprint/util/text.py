@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2020 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
@@ -24,15 +27,15 @@ def sanitize(text, safe_chars="-_.", demoji=True):
 
     Examples:
 
-    >>> sanitize("Hello World!")
+    >>> sanitize("Hello World!") # doctest: +ALLOW_UNICODE
     'Hello-World'
-    >>> sanitize("Hello World!", safe_chars="-_. ")
+    >>> sanitize("Hello World!", safe_chars="-_. ") # doctest: +ALLOW_UNICODE
     'Hello World'
-    >>> sanitize("\u2764")
+    >>> sanitize("\u2764") # doctest: +ALLOW_UNICODE
     'red_heart'
-    >>> sanitize("\u2764\ufe00")
+    >>> sanitize("\u2764\ufe00") # doctest: +ALLOW_UNICODE
     'red_heart'
-    >>> sanitize("\u2764", demoji=False)
+    >>> sanitize("\u2764", demoji=False) # doctest: +ALLOW_UNICODE
     ''
 
     Args:

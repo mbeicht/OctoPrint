@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 """
 This module provides a bunch of utility methods and helpers FOR DEVELOPMENT ONLY.
 """
@@ -5,7 +8,6 @@ This module provides a bunch of utility methods and helpers FOR DEVELOPMENT ONLY
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 
 import contextlib
-import time
 
 
 @contextlib.contextmanager
@@ -27,11 +29,13 @@ def duration_log(context=None, log=None):
 
         log = logging.getLogger(__name__).debug
 
-    start = time.monotonic()
+    import octoprint.util
+
+    start = octoprint.util.monotonic_time()
     try:
         yield
     finally:
-        end = time.monotonic()
+        end = octoprint.util.monotonic_time()
         duration = end - start
 
         if context:
@@ -58,7 +62,7 @@ def log_duration(log=None, with_args=False):
                 args_str = ", ".join(map(lambda x: repr(x), args))
                 kwargs_str = ", ".join(
                     map(
-                        lambda item: f"{item[0]}={repr(item[1])}",
+                        lambda item: "{}={}".format(item[0], repr(item[1])),
                         kwargs.items(),
                     )
                 )
@@ -66,7 +70,7 @@ def log_duration(log=None, with_args=False):
                 arguments = "".join([args_str, sep, kwargs_str])
             else:
                 arguments = "..."
-            context = f"{f.__name__}({arguments})"
+            context = "{name}({arguments})".format(name=f.__name__, arguments=arguments)
             with duration_log(context=context, log=log):
                 return f(*args, **kwargs)
 

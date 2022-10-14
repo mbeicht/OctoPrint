@@ -51,12 +51,9 @@ $(function () {
             self.requestData();
         };
 
-        self.onStartup =
-            self.onUserLoggedIn =
-            self.onUserLoggedOut =
-                function () {
-                    self.requestData();
-                };
+        self.onStartup = self.onUserLoggedIn = self.onUserLoggedOut = function () {
+            self.requestData();
+        };
 
         self.onDataUpdaterPluginMessage = function (plugin, data) {
             if (

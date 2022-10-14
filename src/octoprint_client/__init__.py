@@ -1,6 +1,10 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2015 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
+import io
 import json
 import time
 
@@ -12,19 +16,19 @@ def build_base_url(
     https=False, httpuser=None, httppass=None, host=None, port=None, prefix=None
 ):
     protocol = "https" if https else "http"
-    httpauth = f"{httpuser}:{httppass}@" if httpuser and httppass else ""
+    httpauth = "{}:{}@".format(httpuser, httppass) if httpuser and httppass else ""
     host = host if host else "127.0.0.1"
-    port = f":{port}" if port else ":5000"
+    port = ":{}".format(port) if port else ":5000"
     prefix = prefix if prefix else ""
 
-    return f"{protocol}://{httpauth}{host}{port}{prefix}"
+    return "{}://{}{}{}{}".format(protocol, httpauth, host, port, prefix)
 
 
 class SocketTimeout(BaseException):
     pass
 
 
-class SocketClient:
+class SocketClient(object):
     def __init__(self, url, use_ssl=False, daemon=True, **kwargs):
         self._url = url
         self._use_ssl = use_ssl
@@ -218,7 +222,7 @@ class SocketClient:
         return False
 
 
-class Client:
+class Client(object):
     def __init__(self, baseurl, apikey):
         self.baseurl = baseurl
         self.apikey = apikey
@@ -286,12 +290,14 @@ class Client:
         import os
 
         if not os.path.isfile(file_path):
-            raise ValueError(f"{file_path} cannot be uploaded since it is not a file")
+            raise ValueError(
+                "{} cannot be uploaded since it is not a file".format(file_path)
+            )
 
         if file_name is None:
             file_name = os.path.basename(file_path)
 
-        with open(file_path, "rb") as fp:
+        with io.open(file_path, "rb") as fp:
             if content_type:
                 files = {"file": (file_name, fp, content_type)}
             else:
@@ -408,7 +414,7 @@ class Client:
 
         class CustomSocketClient(SocketClient):
             def auth(self, username, key):
-                self.send({"auth": f"{username}:{key}"})
+                self.send({"auth": "{}:{}".format(username, key)})
 
             def throttle(self, factor):
                 self.send({"throttle": factor})
