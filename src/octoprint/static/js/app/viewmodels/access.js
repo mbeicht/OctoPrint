@@ -40,10 +40,12 @@ $(function () {
                 groups: ko.observableArray([]),
                 permissions: ko.observableArray([]),
                 password: ko.observable(undefined),
+                currentPassword: ko.observable(undefined),
                 repeatedPassword: ko.observable(undefined),
                 passwordMismatch: ko.pureComputed(function () {
                     return self.editor.password() !== self.editor.repeatedPassword();
                 }),
+                currentPasswordMismatch: ko.observable(false),
                 apikey: ko.observable(undefined),
                 active: ko.observable(undefined),
                 permissionSelectable: function (permission) {
@@ -128,6 +130,11 @@ $(function () {
                 }
                 self.editor.password(undefined);
                 self.editor.repeatedPassword(undefined);
+                self.editor.currentPassword(undefined);
+                self.editor.currentPasswordMismatch(false);
+            });
+            self.editor.currentPassword.subscribe(function () {
+                self.editor.currentPasswordMismatch(false);
             });
 
             self.requestData = function () {
@@ -244,13 +251,21 @@ $(function () {
             self.confirmChangePassword = function () {
                 if (!CONFIG_ACCESS_CONTROL) return;
 
-                self.updatePassword(self.currentUser().name, self.editor.password()).done(
-                    function () {
+                self.updatePassword(
+                    self.currentUser().name,
+                    self.editor.password(),
+                    self.editor.currentPassword()
+                )
+                    .done(function () {
                         // close dialog
                         self.currentUser(undefined);
                         self.changePasswordDialog.modal("hide");
-                    }
-                );
+                    })
+                    .fail(function (xhr) {
+                        if (xhr.status === 403) {
+                            self.currentPasswordMismatch(true);
+                        }
+                    });
             };
 
             self.confirmGenerateApikey = function () {
@@ -324,7 +339,7 @@ $(function () {
                     title: gettext("Are you sure?"),
                     message: _.sprintf(
                         gettext('You are about to delete the user "%(name)s".'),
-                        {name: user.name}
+                        {name: _.escape(user.name)}
                     ),
                     proceed: gettext("Delete"),
                     onproceed: function () {
@@ -349,8 +364,8 @@ $(function () {
                     .done(self.fromResponse);
             };
 
-            self.updatePassword = function (username, password) {
-                return OctoPrint.access.users.changePassword(username, password);
+            self.updatePassword = function (username, password, current) {
+                return OctoPrint.access.users.changePassword(username, password, current);
             };
 
             self.generateApikey = function (username) {
@@ -656,7 +671,7 @@ $(function () {
                     title: gettext("Are you sure?"),
                     message: _.sprintf(
                         gettext('You are about to delete the group "%(name)s".'),
-                        {name: group.name}
+                        {name: _.escape(group.name)}
                     ),
                     proceed: gettext("Delete"),
                     onproceed: function () {
@@ -843,15 +858,16 @@ $(function () {
             access.permissions.initialize();
         };
 
-        access.onUserPermissionsChanged = access.onUserLoggedIn = access.onUserLoggedOut = function (
-            user
-        ) {
-            if (access.loginState.hasPermission(access.permissions.SETTINGS)) {
-                access.groups.requestData().done(function () {
-                    access.users.requestData();
-                });
-            }
-        };
+        access.onUserPermissionsChanged =
+            access.onUserLoggedIn =
+            access.onUserLoggedOut =
+                function (user) {
+                    if (access.loginState.hasPermission(access.permissions.ADMIN)) {
+                        access.groups.requestData().done(function () {
+                            access.users.requestData();
+                        });
+                    }
+                };
     }
 
     OCTOPRINT_VIEWMODELS.push([AccessViewModel, ["loginStateViewModel"], []]);

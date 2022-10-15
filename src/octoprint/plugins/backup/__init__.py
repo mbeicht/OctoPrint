@@ -1,6 +1,3 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
-
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2018 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
@@ -11,7 +8,7 @@ from octoprint.events import Events
 from octoprint.server import NO_CONTENT
 from octoprint.server.util.flask import no_firstrun_access
 from octoprint.settings import default_settings
-from octoprint.util import is_hidden_path, to_bytes
+from octoprint.util import is_hidden_path, to_bytes, yaml
 from octoprint.util.pip import create_pip_caller
 from octoprint.util.platform import is_os_compatible
 from octoprint.util.version import (
@@ -22,17 +19,11 @@ from octoprint.util.version import (
 )
 
 try:
-    from os import scandir
-except ImportError:
-    from scandir import scandir
-
-try:
     import zlib  # check if zlib is available
 except ImportError:
     zlib = None
 
 
-import io
 import json
 import logging
 import os
@@ -365,6 +356,9 @@ class BackupPlugin(
     def is_blueprint_protected(self):
         return False
 
+    def is_blueprint_csrf_protected(self):
+        return True
+
     ##~~ WizardPlugin
 
     def is_wizard_required(self):
@@ -379,7 +373,7 @@ class BackupPlugin(
 
     def route_hook(self, *args, **kwargs):
         from octoprint.server import app
-        from octoprint.server.util.flask import admin_validator
+        from octoprint.server.util.flask import permission_validator
         from octoprint.server.util.tornado import (
             LargeResponseHandler,
             access_validation_factory,
@@ -395,9 +389,15 @@ class BackupPlugin(
                     "path": self.get_plugin_data_folder(),
                     "as_attachment": True,
                     "path_validation": path_validation_factory(
-                        lambda path: not is_hidden_path(path), status_code=404
+                        lambda path: not is_hidden_path(path)
+                        and self._match_backup_filename(
+                            os.path.basename(path), self._settings
+                        ),
+                        status_code=404,
                     ),
-                    "access_validation": access_validation_factory(app, admin_validator),
+                    "access_validation": access_validation_factory(
+                        app, permission_validator, Permissions.PLUGIN_BACKUP_ACCESS
+                    ),
                 },
             )
         ]
@@ -512,7 +512,7 @@ class BackupPlugin(
             if not os.path.isdir(datafolder):
                 os.makedirs(datafolder)
 
-            click.echo("Creating backup at {}, please wait...".format(filename))
+            click.echo(f"Creating backup at {filename}, please wait...")
             self._create_backup(
                 filename,
                 exclude=exclude,
@@ -521,7 +521,7 @@ class BackupPlugin(
                 datafolder=datafolder,
             )
             click.echo("Done.")
-            click.echo("Backup located at {}".format(os.path.join(datafolder, filename)))
+            click.echo(f"Backup located at {os.path.join(datafolder, filename)}")
 
         @click.command("restore")
         @click.argument("path")
@@ -556,7 +556,7 @@ class BackupPlugin(
                 path = os.path.join(datafolder, path)
 
             if not os.path.exists(path):
-                click.echo("Backup {} does not exist".format(path), err=True)
+                click.echo(f"Backup {path} does not exist", err=True)
                 sys.exit(-1)
 
             archive = tempfile.NamedTemporaryFile(delete=False)
@@ -574,7 +574,7 @@ class BackupPlugin(
                 pip_args = settings.global_get(["plugins", "pluginmanager", "pip_args"])
 
                 def log(line):
-                    click.echo("\t{}".format(line))
+                    click.echo(f"\t{line}")
 
                 for plugin in plugins:
                     octoprint_compatible = is_octoprint_compatible(
@@ -650,9 +650,9 @@ class BackupPlugin(
                 on_log_error=on_log_error,
                 on_invalid_backup=on_log_error,
             ):
-                click.echo("Restored from {}".format(path))
+                click.echo(f"Restored from {path}")
             else:
-                click.echo("Restoring from {} failed".format(path), err=True)
+                click.echo(f"Restoring from {path} failed", err=True)
 
         return [backup_command, restore_command]
 
@@ -694,7 +694,7 @@ class BackupPlugin(
                     pass
 
             self._send_client_message(
-                "backup_error", payload={"name": name, "error": "{}".format(exc_info[1])}
+                "backup_error", payload={"name": name, "error": f"{exc_info[1]}"}
             )
             self._logger.error("Error while creating backup zip", exc_info=exc_info)
 
@@ -731,12 +731,12 @@ class BackupPlugin(
             try:
                 os.remove(full_path)
             except Exception:
-                self._logger.exception("Could not delete {}".format(filename))
+                self._logger.exception(f"Could not delete {filename}")
                 raise
 
     def _get_backups(self):
         backups = []
-        for entry in scandir(self.get_plugin_data_folder()):
+        for entry in os.scandir(self.get_plugin_data_folder()):
             if is_hidden_path(entry.path):
                 continue
             if not entry.is_file():
@@ -760,7 +760,7 @@ class BackupPlugin(
         data_file = os.path.join(self.get_plugin_data_folder(), UNKNOWN_PLUGINS_FILE)
         if os.path.exists(data_file):
             try:
-                with io.open(data_file, mode="rt", encoding="utf-8") as f:
+                with open(data_file, encoding="utf-8") as f:
                     unknown_plugins = json.load(f)
 
                 assert isinstance(unknown_plugins, list)
@@ -835,7 +835,7 @@ class BackupPlugin(
             return 0
 
         total = 0
-        for entry in scandir(path):
+        for entry in os.scandir(path):
             if entry.is_dir():
                 total += cls._get_disk_size(entry.path, ignored=ignored)
             elif entry.is_file():
@@ -858,7 +858,7 @@ class BackupPlugin(
             r.raise_for_status()
         except Exception:
             logger.exception(
-                "Error while fetching the plugin repository data from {}".format(url)
+                f"Error while fetching the plugin repository data from {url}"
             )
             return {}
 
@@ -879,7 +879,7 @@ class BackupPlugin(
         # prepare pip caller
         def log(prefix, *lines):
             for line in lines:
-                on_log("{} {}".format(prefix, line.rstrip()))
+                on_log(f"{prefix} {line.rstrip()}")
 
         def log_call(*lines):
             log(">", *lines)
@@ -965,15 +965,15 @@ class BackupPlugin(
                             )
                 except Exception:
                     logger.exception(
-                        "Error while retrieving additional excludes "
-                        "from plugin {name}".format(**locals()),
+                        f"Error while retrieving additional excludes "
+                        f"from plugin {name}",
                         extra={"plugin": plugin},
                     )
 
             configfile = settings._configfile
             basedir = settings._basedir
 
-            temporary_path = os.path.join(datafolder, ".{}".format(name))
+            temporary_path = os.path.join(datafolder, f".{name}")
             final_path = os.path.join(datafolder, name)
 
             own_folder = datafolder
@@ -1022,7 +1022,7 @@ class BackupPlugin(
                         return
 
                     if os.path.isdir(source):
-                        for entry in scandir(source):
+                        for entry in os.scandir(source):
                             add_to_zip(
                                 entry.path,
                                 os.path.join(target, entry.name),
@@ -1168,7 +1168,7 @@ class BackupPlugin(
                 temp = tempfile.mkdtemp()
                 try:
                     if callable(on_log_progress):
-                        on_log_progress("Unpacking backup to {}...".format(temp))
+                        on_log_progress(f"Unpacking backup to {temp}...")
 
                     abstemp = os.path.abspath(temp)
                     dirs = {}
@@ -1197,10 +1197,7 @@ class BackupPlugin(
                             on_restore_failed(path)
                         return False
 
-                    import yaml
-
-                    with io.open(configfile, "rt", encoding="utf-8") as f:
-                        configdata = yaml.safe_load(f)
+                    configdata = yaml.load_from_file(path=configfile)
 
                     userfile = os.path.join(temp, "basedir", "users.yaml")
                     if not os.path.exists(userfile):
@@ -1217,7 +1214,7 @@ class BackupPlugin(
                     plugins = []
                     plugin_list_file = os.path.join(temp, "plugin_list.json")
                     if os.path.exists(plugin_list_file):
-                        with io.open(os.path.join(temp, "plugin_list.json"), "rb") as f:
+                        with open(os.path.join(temp, "plugin_list.json"), "rb") as f:
                             plugins = json.load(f)
 
                     known_plugins = []
@@ -1267,16 +1264,12 @@ class BackupPlugin(
                     basedir_extracted = os.path.join(temp, "basedir")
 
                     if callable(on_log_progress):
-                        on_log_progress(
-                            "Renaming {} to {}...".format(basedir, basedir_backup)
-                        )
+                        on_log_progress(f"Renaming {basedir} to {basedir_backup}...")
                     shutil.move(basedir, basedir_backup)
 
                     try:
                         if callable(on_log_progress):
-                            on_log_progress(
-                                "Moving {} to {}...".format(basedir_extracted, basedir)
-                            )
+                            on_log_progress(f"Moving {basedir_extracted} to {basedir}...")
                         shutil.move(basedir_extracted, basedir)
                     except Exception:
                         if callable(on_log_error):
@@ -1303,7 +1296,7 @@ class BackupPlugin(
                             datafolder, UNKNOWN_PLUGINS_FILE
                         )
                         try:
-                            with io.open(unknown_plugins_path, mode="wb") as f:
+                            with open(unknown_plugins_path, mode="wb") as f:
                                 f.write(to_bytes(json.dumps(unknown_plugins)))
                         except Exception:
                             if callable(on_log_error):
@@ -1357,7 +1350,7 @@ class BackupPlugin(
             except Exception:
                 if callable(on_log_error):
                     on_log_error(
-                        "Error while restarting via command {}".format(restart_command),
+                        f"Error while restarting via command {restart_command}",
                         exc_info=sys.exc_info(),
                     )
                     on_log_error("Please restart OctoPrint manually")
@@ -1375,14 +1368,25 @@ class BackupPlugin(
 
     @classmethod
     def _build_backup_filename(cls, settings):
+        backup_prefix = cls._get_backup_prefix(settings)
+        return "{}-backup-{}.zip".format(
+            backup_prefix, time.strftime(BACKUP_DATE_TIME_FMT)
+        )
+
+    @classmethod
+    def _match_backup_filename(cls, path, settings):
+        import re
+
+        backup_prefix = cls._get_backup_prefix(settings)
+        return re.match(re.escape(backup_prefix) + r"-backup-\d{8}-\d{6}.zip", path)
+
+    @classmethod
+    def _get_backup_prefix(cls, settings):
         if settings.global_get(["appearance", "name"]) == "":
             backup_prefix = "octoprint"
         else:
             backup_prefix = settings.global_get(["appearance", "name"])
-        backup_prefix = sanitize(backup_prefix)
-        return "{}-backup-{}.zip".format(
-            backup_prefix, time.strftime(BACKUP_DATE_TIME_FMT)
-        )
+        return sanitize(backup_prefix)
 
     @classmethod
     def _restore_supported(cls, settings):
@@ -1416,7 +1420,7 @@ __plugin_disabling_discouraged__ = gettext(
     "& restore your OctoPrint settings and data."
 )
 __plugin_license__ = "AGPLv3"
-__plugin_pythoncompat__ = ">=2.7,<4"
+__plugin_pythoncompat__ = ">=3.7,<4"
 __plugin_implementation__ = BackupPlugin()
 __plugin_hooks__ = {
     "octoprint.server.http.routes": __plugin_implementation__.route_hook,

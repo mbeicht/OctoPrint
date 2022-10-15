@@ -1,11 +1,7 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
-
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms of the AGPLv3 License"
 
-import io
 import logging
 
 from flask import (
@@ -32,6 +28,7 @@ from octoprint.server import NO_CONTENT
 from octoprint.server.util import (
     corsRequestHandler,
     corsResponseHandler,
+    csrfRequestHandler,
     loginFromApiKeyRequestHandler,
     loginFromAuthorizationHeaderRequestHandler,
     noCachingExceptGetResponseHandler,
@@ -39,8 +36,10 @@ from octoprint.server.util import (
 from octoprint.server.util.flask import (
     get_json_command_from_request,
     get_remote_address,
+    limit,
     no_firstrun_access,
     passive_login,
+    session_signature,
 )
 from octoprint.settings import settings as s
 from octoprint.settings import valid_boolean_trues
@@ -70,6 +69,7 @@ api.after_request(noCachingExceptGetResponseHandler)
 api.before_request(corsRequestHandler)
 api.before_request(loginFromAuthorizationHeaderRequestHandler)
 api.before_request(loginFromApiKeyRequestHandler)
+api.before_request(csrfRequestHandler)
 api.after_request(corsResponseHandler)
 
 # ~~ data from plugins
@@ -121,7 +121,7 @@ def pluginData(name):
         raise
     except Exception:
         logging.getLogger(__name__).exception(
-            "Error calling SimpleApiPlugin {}".format(name), extra={"plugin": name}
+            f"Error calling SimpleApiPlugin {name}", extra={"plugin": name}
         )
         return abort(500)
 
@@ -163,7 +163,7 @@ def pluginCommand(name):
         raise
     except Exception:
         logging.getLogger(__name__).exception(
-            "Error while executing SimpleApiPlugin {}".format(name),
+            f"Error while executing SimpleApiPlugin {name}",
             extra={"plugin": name},
         )
         return abort(500)
@@ -271,7 +271,7 @@ def apiVersion():
     return jsonify(
         server=octoprint.server.VERSION,
         api=VERSION,
-        text="OctoPrint {}".format(octoprint.server.DISPLAY_VERSION),
+        text=f"OctoPrint {octoprint.server.DISPLAY_VERSION}",
     )
 
 
@@ -285,6 +285,11 @@ def serverStatus():
 
 
 @api.route("/login", methods=["POST"])
+@limit(
+    "3/minute;5/10 minutes;10/hour",
+    deduct_when=lambda response: response.status_code == 403,
+    error_message="You have made too many failed login attempts. Please try again later.",
+)
 def login():
     data = request.get_json()
     if not data:
@@ -310,6 +315,9 @@ def login():
 
                 user = octoprint.server.userManager.login_user(user)
                 session["usersession.id"] = user.session
+                session["usersession.signature"] = session_signature(
+                    username, user.session
+                )
                 g.user = user
 
                 login_user(user, remember=remember)
@@ -484,7 +492,7 @@ def _test_path(data):
                 os.makedirs(path)
             except Exception:
                 logging.getLogger(__name__).exception(
-                    "Error while trying to create {}".format(path)
+                    f"Error while trying to create {path}"
                 )
                 return jsonify(
                     path=path,
@@ -517,12 +525,12 @@ def _test_path(data):
     if check_writable_dir and check_type == "dir":
         try:
             test_path = os.path.join(path, ".testballoon.txt")
-            with io.open(test_path, "wb") as f:
+            with open(test_path, "wb") as f:
                 f.write(b"Test")
             os.remove(test_path)
         except Exception:
             logging.getLogger(__name__).exception(
-                "Error while testing if {} is really writable".format(path)
+                f"Error while testing if {path} is really writable"
             )
             return jsonify(
                 path=path,
@@ -548,7 +556,7 @@ def _test_url(data):
 
     from octoprint import util as util
 
-    class StatusCodeRange(object):
+    class StatusCodeRange:
         def __init__(self, start=None, end=None):
             self.start = start
             self.end = end
@@ -687,7 +695,7 @@ def _test_url(data):
                 response_result["content"] = content
     except Exception:
         logging.getLogger(__name__).exception(
-            "Error while running a test {} request on {}".format(method, url)
+            f"Error while running a test {method} request on {url}"
         )
         outcome = False
 

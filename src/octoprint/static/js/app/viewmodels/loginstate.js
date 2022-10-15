@@ -127,8 +127,7 @@ $(function () {
                                 "mistaken since you are in an isolated LAN, feel free to ignore it.</small></p>"
                         );
                         text = _.sprintf(text, {
-                            url:
-                                "https://octoprint.org/blog/2018/09/03/safe-remote-access/"
+                            url: "https://octoprint.org/blog/2018/09/03/safe-remote-access/"
                         });
 
                         if (self.externalAddressNotification !== undefined) {
@@ -309,7 +308,7 @@ $(function () {
         };
 
         self.onDataUpdaterReauthRequired = function (reason) {
-            if (reason === "logout" || reason === "removed") {
+            if (reason === "logout" || reason === "stale" || reason === "removed") {
                 self.logout();
             } else {
                 self.requestData();

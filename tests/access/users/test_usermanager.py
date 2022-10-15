@@ -1,6 +1,3 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
-
 """
 Unit tests for octoprint.access.users.UserManager
 """
@@ -21,7 +18,6 @@ class UserManagerTest(unittest.TestCase):
         """Test for issue #1891"""
 
         password = "password with ümläutß"
-        salt = "abc"
 
         # should not throw an exception
-        octoprint.access.users.UserManager.create_password_hash(password, salt=salt)
+        octoprint.access.users.UserManager.create_password_hash(password)

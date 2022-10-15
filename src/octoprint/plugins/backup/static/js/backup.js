@@ -40,7 +40,6 @@ $(function () {
             dataType: "json",
             maxNumberOfFiles: 1,
             autoUpload: false,
-            headers: OctoPrint.getRequestHeaders(),
             add: function (e, data) {
                 if (data.files.length === 0) {
                     // no files? ignore
@@ -316,7 +315,8 @@ $(function () {
             );
         };
 
-        self._forcedStdoutLine = /You are using pip version .*?, however version .*? is available\.|You should consider upgrading via the '.*?' command\./;
+        self._forcedStdoutLine =
+            /You are using pip version .*?, however version .*? is available\.|You should consider upgrading via the '.*?' command\./;
         self._preprocessLine = function (line) {
             if (line.stream === "stderr" && line.line.match(self._forcedStdoutLine)) {
                 line.stream = "stdout";

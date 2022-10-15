@@ -1,6 +1,3 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
-
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = "GNU Affero General Public License http://www.gnu.org/licenses/agpl.html"
 __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms of the AGPLv3 License"
@@ -9,6 +6,7 @@ import hashlib
 import logging
 import os
 import threading
+from urllib.parse import quote as urlquote
 
 import psutil
 from flask import abort, jsonify, make_response, request, url_for
@@ -36,11 +34,6 @@ from octoprint.server.util.flask import (
 )
 from octoprint.settings import settings, valid_boolean_trues
 from octoprint.util import sv, time_this
-
-try:
-    from urllib.parse import quote as urlquote
-except ImportError:
-    from urllib import quote as urlquote  # noqa: F401
 
 # ~~ GCODE file handling
 
@@ -210,7 +203,7 @@ def runFilesTest():
                 ),
             ):
                 counter += 1
-                suggestion = name + "_{}".format(counter) + ext
+                suggestion = f"{name}_{counter}{ext}"
             return jsonify(exists=True, suggestion=suggestion)
         else:
             return jsonify(exists=False)
@@ -346,7 +339,7 @@ def _getFileList(
             )
 
         with _file_cache_mutex:
-            cache_key = "{}:{}:{}:{}".format(origin, path, recursive, filter)
+            cache_key = f"{origin}:{path}:{recursive}:{filter}"
             files, lastmodified = _file_cache.get(cache_key, ([], None))
             # recursive needs to be True for lastmodified queries so we get lastmodified of whole subtree - #3422
             if (
@@ -524,23 +517,13 @@ def uploadGcodeFile(target):
             except Exception:
                 abort(400, description="userdata contains invalid JSON")
 
+        # check preconditions for SD upload
         if target == FileDestinations.SDCARD and not settings().getBoolean(
             ["feature", "sdSupport"]
         ):
             abort(404)
 
         sd = target == FileDestinations.SDCARD
-        selectAfterUpload = (
-            "select" in request.values
-            and request.values["select"] in valid_boolean_trues
-            and Permissions.FILES_SELECT.can()
-        )
-        printAfterSelect = (
-            "print" in request.values
-            and request.values["print"] in valid_boolean_trues
-            and Permissions.PRINT.can()
-        )
-
         if sd:
             # validate that all preconditions for SD upload are met before attempting it
             if not (
@@ -553,6 +536,33 @@ def uploadGcodeFile(target):
                 )
             if not printer.is_sd_ready():
                 abort(409, description="Can not upload to SD card, not yet initialized")
+
+        # evaluate select and print parameter and if set check permissions & preconditions
+        # and adjust as necessary
+        #
+        # we do NOT abort(409) here since this would be a backwards incompatible behaviour change
+        # on the API, but instead return the actually effective select and print flags in the response
+        #
+        # note that this behaviour might change in a future API version
+        select_request = (
+            "select" in request.values
+            and request.values["select"] in valid_boolean_trues
+            and Permissions.FILES_SELECT.can()
+        )
+        print_request = (
+            "print" in request.values
+            and request.values["print"] in valid_boolean_trues
+            and Permissions.PRINT.can()
+        )
+
+        to_select = select_request
+        to_print = print_request
+        if (to_select or to_print) and not (
+            printer.is_operational()
+            and not (printer.is_printing() or printer.is_paused())
+        ):
+            # can't select or print files if not operational or ready
+            to_select = to_print = False
 
         # determine future filename of file to be uploaded, abort if it can't be uploaded
         try:
@@ -575,7 +585,7 @@ def uploadGcodeFile(target):
             futureFilename = None
 
         if futureFilename is None:
-            abort(415, description="Can not upload file, wrong format?")
+            abort(400, description="Can not upload file, invalid file name")
 
         # prohibit overwriting currently selected file while it's being printed
         futureFullPath = fileManager.join_path(
@@ -597,6 +607,15 @@ def uploadGcodeFile(target):
         ):
             abort(409, description="File already exists and noOverwrite was set")
 
+        if (
+            fileManager.file_exists(FileDestinations.LOCAL, futureFullPathInStorage)
+            and not Permissions.FILES_DELETE.can()
+        ):
+            abort(
+                403,
+                description="File already exists, cannot overwrite due to a lack of permissions",
+            )
+
         reselect = printer.is_current_file(futureFullPathInStorage, sd)
 
         user = current_user.get_name()
@@ -606,7 +625,7 @@ def uploadGcodeFile(target):
             Callback for when the file processing (upload, optional slicing, addition to analysis queue) has
             finished.
 
-            Depending on the file's destination triggers either streaming to SD card or directly calls selectAndOrPrint.
+            Depending on the file's destination triggers either streaming to SD card or directly calls to_select.
             """
 
             if (
@@ -629,16 +648,16 @@ def uploadGcodeFile(target):
             the case after they have finished streaming to the printer, which is why this callback is also used
             for the corresponding call to addSdFile.
 
-            Selects the just uploaded file if either selectAfterUpload or printAfterSelect are True, or if the
+            Selects the just uploaded file if either to_select or to_print are True, or if the
             exact file is already selected, such reloading it.
             """
             if octoprint.filemanager.valid_file_type(added_file, "gcode") and (
-                selectAfterUpload or printAfterSelect or reselect
+                to_select or to_print or reselect
             ):
                 printer.select_file(
                     absFilename,
                     destination == FileDestinations.SDCARD,
-                    printAfterSelect,
+                    to_print,
                     user,
                 )
 
@@ -652,13 +671,9 @@ def uploadGcodeFile(target):
             )
         except octoprint.filemanager.storage.StorageError as e:
             if e.code == octoprint.filemanager.storage.StorageError.INVALID_FILE:
-                abort(400, description="Could not upload file, invalid type")
+                abort(415, description="Could not upload file, invalid type")
             else:
                 abort(500, description="Could not upload file")
-
-        if octoprint.filemanager.valid_file_type(added_file, "stl"):
-            filename = added_file
-            done = True
         else:
             filename = fileProcessingFinished(
                 added_file,
@@ -681,8 +696,10 @@ def uploadGcodeFile(target):
             "name": futureFilename,
             "path": filename,
             "target": target,
-            "select": selectAfterUpload,
-            "print": printAfterSelect,
+            "select": select_request,
+            "print": print_request,
+            "effective_select": to_select,
+            "effective_print": to_print,
         }
         if userdata is not None:
             payload["userdata"] = userdata
@@ -731,7 +748,15 @@ def uploadGcodeFile(target):
                 }
             )
 
-        r = make_response(jsonify(files=files, done=done), 201)
+        r = make_response(
+            jsonify(
+                files=files,
+                done=done,
+                effectiveSelect=to_select,
+                effectivePrint=to_print,
+            ),
+            201,
+        )
         r.headers["Location"] = location
         return r
 
@@ -1081,7 +1106,7 @@ def gcodeFileCommand(filename, target):
         with Permissions.FILES_UPLOAD.require(403):
             # Copy and move are only possible on local storage
             if target not in [FileDestinations.LOCAL]:
-                abort(400, description="Unsupported target for {}".format(command))
+                abort(400, description=f"Unsupported target for {command}")
 
             if not _verifyFileExists(target, filename) and not _verifyFolderExists(
                 target, filename
@@ -1120,46 +1145,57 @@ def gcodeFileCommand(filename, target):
             is_folder = fileManager.folder_exists(target, filename)
 
             if not (is_file or is_folder):
-                abort(
-                    400, description="Neither file nor folder, can't {}".format(command)
-                )
+                abort(400, description=f"Neither file nor folder, can't {command}")
 
-            if command == "copy":
-                # destination already there? error...
-                if _verifyFileExists(target, destination) or _verifyFolderExists(
-                    target, destination
-                ):
-                    abort(409, description="File or folder does already exist")
-
-                if is_file:
-                    fileManager.copy_file(target, filename, destination)
-                else:
-                    fileManager.copy_folder(target, filename, destination)
-
-            elif command == "move":
-                with Permissions.FILES_DELETE.require(403):
-                    if _isBusy(target, filename):
-                        abort(
-                            409,
-                            description="Trying to move a file or folder that is currently in use",
-                        )
-
-                    # destination already there AND not ourselves (= display rename)? error...
-                    if (
-                        _verifyFileExists(target, destination)
-                        or _verifyFolderExists(target, destination)
-                    ) and sanitized_destination != filename:
+            try:
+                if command == "copy":
+                    # destination already there? error...
+                    if _verifyFileExists(target, destination) or _verifyFolderExists(
+                        target, destination
+                    ):
                         abort(409, description="File or folder does already exist")
 
-                    # deselect the file if it's currently selected
-                    currentOrigin, currentFilename = _getCurrentFile()
-                    if currentFilename is not None and filename == currentFilename:
-                        printer.unselect_file()
-
                     if is_file:
-                        fileManager.move_file(target, filename, destination)
+                        fileManager.copy_file(target, filename, destination)
                     else:
-                        fileManager.move_folder(target, filename, destination)
+                        fileManager.copy_folder(target, filename, destination)
+
+                elif command == "move":
+                    with Permissions.FILES_DELETE.require(403):
+                        if _isBusy(target, filename):
+                            abort(
+                                409,
+                                description="Trying to move a file or folder that is currently in use",
+                            )
+
+                        # destination already there AND not ourselves (= display rename)? error...
+                        if (
+                            _verifyFileExists(target, destination)
+                            or _verifyFolderExists(target, destination)
+                        ) and sanitized_destination != filename:
+                            abort(409, description="File or folder does already exist")
+
+                        # deselect the file if it's currently selected
+                        currentOrigin, currentFilename = _getCurrentFile()
+                        if currentFilename is not None and filename == currentFilename:
+                            printer.unselect_file()
+
+                        if is_file:
+                            fileManager.move_file(target, filename, destination)
+                        else:
+                            fileManager.move_folder(target, filename, destination)
+
+            except octoprint.filemanager.storage.StorageError as e:
+                if e.code == octoprint.filemanager.storage.StorageError.INVALID_FILE:
+                    abort(
+                        415,
+                        description=f"Could not {command} {filename} to {destination}, invalid type",
+                    )
+                else:
+                    abort(
+                        500,
+                        description=f"Could not {command} {filename} to {destination}",
+                    )
 
             location = url_for(
                 ".readGcodeFile",

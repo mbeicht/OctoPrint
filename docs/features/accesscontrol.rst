@@ -133,7 +133,7 @@ Example: Your PC has an IP address of ``192.168.23.42`` and a subnet mask of
 The easy way: Using the OctoPrint-AutoLoginConfig plugin
 ........................................................
 
-The easist way to configure AutoLogin is to install the
+The easiest way to configure AutoLogin is to install the
 `OctoPrint-AutoLoginConfig plugin <https://plugins.octoprint.org/plugins/autologin_config/>`_
 via the plugin manager.
 
@@ -165,7 +165,7 @@ further down there's also a dedicated list of steps for OctoPi specifically.
 
 1. Shutdown OctoPrint
 2. Make a backup of your config.yaml
-3. Open it in a text editor (e.g. nano). Right at the very top it'll say something like
+3. Open it in a text editor (e.g. nano). Look if right at the very top it says something like
    this:
 
    .. code-block:: yaml
@@ -173,13 +173,26 @@ further down there's also a dedicated list of steps for OctoPi specifically.
       accessControl:
           salt: aabbccddee1234523452345
 
-   Edit this, adding lines so it looks like this (making absolutely sure not to touch the
+   If so, edit this, adding lines so it looks like this (making absolutely sure not to touch the
    salt line):
 
    .. code-block:: yaml
 
       accessControl:
           salt: aabbccddee1234523452345
+          autologinLocal: true
+          autologinAs: "<yourUsername>"
+          localNetworks:
+          - "127.0.0.0/8"
+          - "::1/128"
+          - "<yourAddressRange>"
+
+   Otherwise, add the following lines to the very top of the file, making sure to keep the
+   indentation:
+
+   .. code-block:: yaml
+
+      accessControl:
           autologinLocal: true
           autologinAs: "<yourUsername>"
           localNetworks:
@@ -200,7 +213,7 @@ the following commands:
 
 1. ``sudo service octoprint stop``
 2. ``cp ~/.octoprint/config.yaml ~/.octoprint/config.yaml.back``
-3. ``nano ~/.octoprint/config.yaml, make the edits as described above``
+3. ``nano ~/.octoprint/config.yaml``, make the edits as described above
 4. ``sudo service octoprint start``
 
 If something went wrong, you can restore the config backup with
